@@ -143,28 +143,4 @@ The structured state owns facts. Renderers own files:
 | `changelog.md` | Versioned revision records |
 | `schema.sql` / `seed.sql` | Approved logical model plus selected dialect |
 
-## 6. Requirement traceability
 
-The implementation must map the PDF requirements to checks:
-
-| PDF requirement | Contract check |
-|---|---|
-| Six stages in order | Lifecycle and transition guards |
-| Follow-up interview | Interview completion requires a follow-up round |
-| Four required DBMS options | Selection output validates all four |
-| Consistent design files | Cross-artifact model validation |
-| Propagated revisions | New version regenerates all affected artifacts |
-| Explicit approval before SQL | SQL guard checks approved version ID |
-| Realistic complete seed data | Seed coverage and constraint checks |
-| State persistence | Session stores lifecycle and versioned artifacts |
-| External prompts | Prompt loader reads files outside source modules |
-| LLM logging | One log record per attempt, with secrets excluded |
-| Configurable provider/model | Provider settings are external to workflow code |
-| Organized output | Each session has an isolated output directory |
-
-## 7. Deliberate scope for the next step
-
-This step defines behavior only. It does not choose a UI, purchase an API plan,
-implement provider calls, or generate a test scenario. The next implementation
-step is the persistent session state schema and save/load behavior. A fake LLM
-provider should be used there so progress does not depend on GapGPT credentials.
