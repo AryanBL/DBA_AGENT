@@ -67,6 +67,27 @@ class Session:
                 return version
         raise StateError(f"active design version {self.active_version} is missing")
 
+    def complete_intake(self, intake_text: str, intake_summary: dict[str, Any]) -> None:
+        """Accept a structured intake summary and advance to interviewing.
+
+        The summary is the reviewed output of the intake stage.  Keeping this
+        transition explicit prevents an interview from starting with an empty
+        or incomplete understanding of the user's system.
+        """
+        if self.state != Stage.NEW:
+            raise StateError("intake can only be completed for a new session")
+        if not isinstance(intake_text, str) or not intake_text.strip():
+            raise StateError("intake text must be a non-empty string")
+        if not isinstance(intake_summary, dict):
+            raise StateError("intake summary must be an object")
+        required = {"actors", "entities", "processes", "requirements", "ambiguities"}
+        if not required.issubset(intake_summary):
+            raise StateError(f"missing intake fields: {sorted(required - intake_summary.keys())}")
+        self.intake_text = intake_text
+        self.intake_summary = intake_summary
+        self.state = Stage.INTAKE_COMPLETE
+        self.touch()
+
     def start_interview(self) -> None:
         if self.state not in (Stage.INTAKE_COMPLETE, Stage.INTERVIEWING):
             raise StateError("interview requires a completed intake summary")
