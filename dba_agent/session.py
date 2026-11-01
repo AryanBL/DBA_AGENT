@@ -97,6 +97,13 @@ class Session:
     def add_interview_round(self, questions: list[str], answers: dict[str, str]) -> None:
         if self.state != Stage.INTERVIEWING:
             raise StateError("interview answers require INTERVIEWING state")
+        if not questions or any(not isinstance(question, str) or not question.strip() for question in questions):
+            raise StateError("interview questions must be non-empty strings")
+        if not isinstance(answers, dict) or any(
+            not isinstance(question, str) or not question.strip() or not isinstance(answer, str) or not answer.strip()
+            for question, answer in answers.items()
+        ):
+            raise StateError("interview answers must be a mapping of non-empty strings")
         self.interview_rounds.append({"questions": questions, "answers": answers})
         self.touch()
 
@@ -108,9 +115,25 @@ class Session:
         required = {"entities", "relationships", "volume", "workload", "transactions", "security", "business_rules"}
         if not required.issubset(requirements):
             raise StateError(f"missing interview categories: {sorted(required - requirements.keys())}")
+        from .interview import validate_requirements
+
+        try:
+            validate_requirements(requirements)
+        except ValueError as exc:
+            raise StateError(str(exc)) from exc
         self.requirements = requirements
         self.state = Stage.REQUIREMENTS_COMPLETE
         self.touch()
+
+    def requirements_markdown(self) -> str:
+        """Return the requirements artifact for the completed interview."""
+        if self.state not in (Stage.REQUIREMENTS_COMPLETE, Stage.DBMS_SELECTED,
+                              Stage.DESIGN_READY, Stage.REVISION_PENDING,
+                              Stage.APPROVED, Stage.SQL_GENERATED):
+            raise StateError("requirements are not complete")
+        from .interview import render_requirements_markdown
+
+        return render_requirements_markdown(self.requirements, self.interview_rounds)
 
     def revise(self, model: dict[str, Any], artifacts: dict[str, str] | None = None) -> None:
         number = self.versions[-1].number + 1
