@@ -79,6 +79,18 @@ SQLite, and SQL Server, decision rationale, rejected alternatives, and
 **Completion:** the selected DBMS is supported, each major requirement is linked
 to evidence in the decision, and the user can inspect the recommendation.
 
+The domain representation uses `Session.select_dbms()` and stores a
+`dbms_choice` object with these fields:
+
+* `selected` — one of the four supported DBMS names.
+* `rationale` — the overall recommendation.
+* `comparison` — strengths, limitations, and fit assessment for every supported DBMS.
+* `rejected` — a reason for each alternative to the selected DBMS.
+* `evidence` — one explanation for each mandatory interview category.
+
+`Session.dbms_choice_markdown()` renders this validated record to
+`dbms-choice.md`.
+
 ### Stage 4 — Design documentation
 
 **Input:** requirements, DBMS choice, and the authoritative design model.

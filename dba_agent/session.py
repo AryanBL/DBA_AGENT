@@ -125,6 +125,30 @@ class Session:
         self.state = Stage.REQUIREMENTS_COMPLETE
         self.touch()
 
+    def select_dbms(self, choice: dict[str, Any]) -> None:
+        """Accept a validated DBMS recommendation and advance the workflow."""
+        if self.state != Stage.REQUIREMENTS_COMPLETE:
+            raise StateError("DBMS selection requires completed requirements")
+        from .dbms import validate_dbms_choice
+
+        try:
+            validate_dbms_choice(choice)
+        except ValueError as exc:
+            raise StateError(str(exc)) from exc
+        self.dbms_choice = dict(choice)
+        self.state = Stage.DBMS_SELECTED
+        self.touch()
+
+    def dbms_choice_markdown(self) -> str:
+        """Return the DBMS selection artifact."""
+        if self.state not in (Stage.DBMS_SELECTED, Stage.DESIGN_READY,
+                              Stage.REVISION_PENDING, Stage.APPROVED,
+                              Stage.SQL_GENERATED):
+            raise StateError("DBMS selection is not complete")
+        from .dbms import render_dbms_choice_markdown
+
+        return render_dbms_choice_markdown(self.dbms_choice)
+
     def requirements_markdown(self) -> str:
         """Return the requirements artifact for the completed interview."""
         if self.state not in (Stage.REQUIREMENTS_COMPLETE, Stage.DBMS_SELECTED,
