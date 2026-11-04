@@ -29,6 +29,8 @@ def validate_requirements(requirements: Mapping[str, Any]) -> None:
     cannot support DBMS selection.
     """
 
+    if not isinstance(requirements, Mapping):
+        raise ValueError("requirements must be an object")
     missing = [key for key, _ in REQUIRED_CATEGORIES if key not in requirements]
     if missing:
         raise ValueError(f"missing interview categories: {missing}")

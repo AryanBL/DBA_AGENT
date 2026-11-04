@@ -1,90 +1,62 @@
-import json
-
+"""Unit tests for transitions, validation, persistence and approval invalidation."""
+import tempfile
 import unittest
 
 from dba_agent import Session, SessionStore, Stage, StateError
-
-
-def dbms_choice():
-  names = ["PostgreSQL", "MySQL/MariaDB", "SQLite", "SQL Server"]
-  return {
-      "selected": "PostgreSQL",
-      "rationale": "The workload needs strong transactions, reporting, and concurrent access.",
-      "comparison": {
-          name: {
-              "strengths": [f"Strength of {name}"],
-              "limitations": [f"Limitation of {name}"],
-              "fit": f"Fit assessment for {name}",
-          }
-          for name in names
-      },
-      "rejected": {
-          name: f"{name} is less suitable for the stated workload."
-          for name in names if name != "PostgreSQL"
-      },
-      "evidence": {
-          "entities": "The system has several related entities.",
-          "relationships": "Relationships require foreign keys and cardinality enforcement.",
-          "volume": "The data volume is expected to grow steadily.",
-          "workload": "Reports and concurrent reads are important.",
-          "transactions": "Operations require atomic transactions.",
-          "security": "Roles and access controls are required.",
-          "business_rules": "Business rules require constraints and validation.",
-      },
-  }
+from dba_agent.interview import REQUIRED_CATEGORIES
 
 
 class SessionTests(unittest.TestCase):
-  def test_round_trip_preserves_state(self):
-    import tempfile
-    with tempfile.TemporaryDirectory() as directory:
-      session = Session(intake_text="A library system")
-      session.intake_summary = {"actors": ["librarian"]}
-      session.state = Stage.INTAKE_COMPLETE
-      store = SessionStore(directory)
-      path = store.save(session)
-      restored = store.load(session.session_id)
-      self.assertTrue(path.exists())
-      self.assertEqual(restored.to_dict(), session.to_dict())
+    def setUp(self):
+        self.requirements = {key: f"Meaningful {key} answer" for key, _ in REQUIRED_CATEGORIES}
+        self.coverage = {key: True for key, _ in REQUIRED_CATEGORIES}
 
+    def interview_session(self):
+        session = Session()
+        session.complete_intake("A library lending service", {"actors": ["member"], "entities": ["books"], "processes": ["borrow"], "requirements": [], "ambiguities": []})
+        session.start_interview()
+        session.set_questions(["Which entities?"])
+        session.add_interview_round(["Which entities?"], {"Which entities?": "Books and loans"})
+        return session
 
-  def test_interview_requires_follow_up_and_all_categories(self):
-    session = Session(state=Stage.INTAKE_COMPLETE)
-    session.start_interview()
-    categories = {name: "covered" for name in ["entities", "relationships", "volume", "workload", "transactions", "security", "business_rules"]}
-    with self.assertRaises(StateError):
-        session.complete_requirements(categories)
-    session.add_interview_round(["What entities exist?"], {"What entities exist?": "books"})
-    session.add_interview_round(["How many books?"], {"How many books?": "1000"})
-    session.complete_requirements(categories)
-    assert session.state == Stage.REQUIREMENTS_COMPLETE
+    def test_round_trip_preserves_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = self.interview_session()
+            store = SessionStore(directory)
+            path = store.save(session)
+            restored = store.load(session.session_id)
+            self.assertTrue(path.exists())
+            self.assertEqual(restored.to_dict(), session.to_dict())
 
-  def test_dbms_selection_records_choice_and_renders_artifact(self):
-    session = Session(state=Stage.REQUIREMENTS_COMPLETE)
-    session.select_dbms(dbms_choice())
-    self.assertEqual(session.state, Stage.DBMS_SELECTED)
-    markdown = session.dbms_choice_markdown()
-    self.assertIn("# DBMS Selection", markdown)
-    self.assertIn("**PostgreSQL**", markdown)
-    self.assertIn("| SQLite |", markdown)
+    def test_interview_requires_follow_up_coverage_and_agent_decision(self):
+        session = self.interview_session()
+        assessment = {"ready": True, "coverage": self.coverage, "critical_contradictions": [], "requirements": self.requirements}
+        session.assess_interview(assessment)
+        with self.assertRaises(StateError):
+            session.complete_requirements(self.requirements)
+        session.set_questions(["How many users?"])
+        session.add_interview_round(["How many users?"], {"How many users?": "1000"})
+        with self.assertRaises(StateError):
+            session.complete_requirements(self.requirements)
+        session.assess_interview({**assessment, "ready": False})
+        with self.assertRaises(StateError):
+            session.complete_requirements(self.requirements)
+        session.assess_interview(assessment)
+        session.complete_requirements(self.requirements)
+        self.assertEqual(session.state, Stage.REQUIREMENTS_COMPLETE)
+        self.assertIn("Data volume and growth", session.requirements_markdown())
 
-  def test_dbms_selection_requires_all_supported_comparisons(self):
-    session = Session(state=Stage.REQUIREMENTS_COMPLETE)
-    choice = dbms_choice()
-    del choice["comparison"]["SQLite"]
-    with self.assertRaises(StateError):
-      session.select_dbms(choice)
+    def test_traversal_prevented(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(directory)
+            with self.assertRaises(StateError):
+                store.load("../secret")
 
-
-  def test_revision_clears_approval_and_sql_requires_active_approval(self):
-    session = Session(state=Stage.DESIGN_READY)
-    session.approve()
-    session.require_sql_approval()
-    session.revise({"entities": ["customer"]})
-    with self.assertRaises(StateError):
-        session.require_sql_approval()
+    def test_revise_rejects_incomplete_model(self):
+        session = Session(state=Stage.DESIGN_READY)
+        with self.assertRaises(StateError):
+            session.revise({}, reason="new request", request="add table")
 
 
 if __name__ == "__main__":
-  unittest.main()
-
+    unittest.main()

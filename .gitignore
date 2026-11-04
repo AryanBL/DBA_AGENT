@@ -2,5 +2,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
-env/
-upload/
+.dba_agent/
+output/
+.env
+*.sqlite
+*.db
+*.egg-info/
+build/
+dist/

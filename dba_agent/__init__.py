@@ -1,11 +1,7 @@
-"""Core domain objects for DBA Agent."""
-
-from .session import Session, SessionStore, Stage, StateError
+"""Public API for DBA Agent domain, orchestration and configuration."""
+from .config import Config
 from .interview import REQUIRED_CATEGORIES, render_requirements_markdown, validate_requirements
-from .dbms import SUPPORTED_DBMS, render_dbms_choice_markdown, validate_dbms_choice
+from .service import AgentService
+from .session import DesignVersion, Session, SessionStore, Stage, StateError
 
-__all__ = [
-    "Session", "SessionStore", "Stage", "StateError",
-    "REQUIRED_CATEGORIES", "render_requirements_markdown", "validate_requirements",
-    "SUPPORTED_DBMS", "render_dbms_choice_markdown", "validate_dbms_choice",
-]
+__all__ = ["Config", "AgentService", "DesignVersion", "Session", "SessionStore", "Stage", "StateError", "REQUIRED_CATEGORIES", "render_requirements_markdown", "validate_requirements"]

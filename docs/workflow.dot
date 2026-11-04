@@ -1,0 +1,17 @@
+digraph Flow {
+  graph [rankdir=LR, bgcolor=white, nodesep="0.38", ranksep="0.52", pad="0.2", label="Six-Stage Workflow & Approval Gate", labelloc="t", fontsize=18, fontname="DejaVu Sans", fontcolor="#172C45"];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=11, color="#DCE5ED", margin="0.22,0.15"];
+  edge [color="#77909D", arrowsize=0.7];
+  intake [label="1. Intake", fillcolor="#E1F2F0"];
+  interview [label="2. Interview\n(first + follow-up)", fillcolor="#D9E9F7"];
+  dbms [label="3. DBMS choice", fillcolor="#E1E9FA"];
+  docs [label="4. Design docs", fillcolor="#EEE3FB"];
+  revise [label="5. Revision\nnew model/version", fillcolor="#FEECDA"];
+  approve [label="Explicit approval\ncurrent version", fillcolor="#E4F2E5"];
+  sql [label="6. SQL + seed", fillcolor="#F4E7EA"];
+  intake -> interview -> dbms -> docs -> approve -> sql;
+  docs -> revise [label="user requests change", fontsize=9];
+  revise -> docs [label="regenerate all docs", fontsize=9];
+  sql -> revise [label="later change", fontsize=9, constraint=false];
+  interview -> interview [label="until ready (>= 2 rounds)", fontsize=9];
+}

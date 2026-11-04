@@ -1,158 +1,34 @@
-# DBA Agent Workflow Contract
+# DBA Agent Workflow Contract — Implemented Version
 
-This document defines the first implementation boundary for DBA Agent. It specifies
-what each stage accepts, what it produces, and when the workflow may advance. It is
-an application contract, not a prompt and not a database design for a particular
-test scenario.
+This contract documents the behavior of the revised code, not features that are only planned. The source of truth is the JSON-persisted `Session` and its active `DesignVersion.model`.
 
-## 1. Core invariants
+## States
 
-1. The session has one authoritative structured design model. Markdown documents,
-   diagrams, SQL, and the changelog are generated from versioned state rather than
-   maintained as unrelated LLM outputs.
-2. Every accepted model response is validated before it changes session state.
-3. User statements, model inferences, and unresolved assumptions remain distinct.
-4. A revision creates a new design version. Approval belongs to a specific version.
-5. Any change to requirements, DBMS, entities, attributes, relationships, rules,
-   keys, constraints, or indexes invalidates the previous approval.
-6. SQL generation is forbidden until the current design version is explicitly
-   approved by the user.
-7. Every LLM attempt is logged with its stage, request, response or error, and
-   attempt number. Secrets must never enter logs.
+`NEW` -> `INTAKE_COMPLETE` -> `INTERVIEWING` -> `REQUIREMENTS_COMPLETE` -> `DBMS_SELECTED` -> `DESIGN_READY` -> `APPROVED` -> `SQL_GENERATED`.
 
-## 2. Lifecycle
+The interview remains in `INTERVIEWING` for additional rounds. A successful revision of a complete design creates a new version and returns directly to `DESIGN_READY`, clearing `approval_version`. The legacy `REVISION_PENDING` enum is retained for compatibility but not used as an externally visible intermediate state by the current revision method.
 
-```text
-NEW
-  -> INTAKE_COMPLETE
-  -> INTERVIEWING
-  -> REQUIREMENTS_COMPLETE
-  -> DBMS_SELECTED
-  -> DESIGN_READY
-  -> REVISION_PENDING (zero or more cycles)
-  -> APPROVED
-  -> SQL_GENERATED
-```
+## Stage contracts
 
-`INTERVIEWING` may return to itself for follow-up rounds. `REVISION_PENDING` may
-return to `DESIGN_READY` after validation, or to `DBMS_SELECTED` when a DBMS
-change requires a new selection. Any revision from `APPROVED` returns to
-`REVISION_PENDING` and removes approval from the active version. A failed model
-call or validation does not advance the lifecycle.
+| Stage | Input | Output / guard |
+|---|---|---|
+| 1. Intake | User free text | Five-list intake summary (`actors`, `entities`, `processes`, `requirements`, `ambiguities`) and saved session. |
+| 2. Interview | Summary, previous Q&A | Question/answer rounds, model completeness assessment, seven-category requirements. At least one answered follow-up round; the agent must declare readiness and no critical contradictions. |
+| 3. DBMS | Completed requirements | Selection of PostgreSQL, MySQL/MariaDB, SQLite, or SQL Server, comparison of all four and rejection reasons for other three. |
+| 4. Design | Requirements, DBMS | One validated structured model and deterministic `requirements.md`, `dbms-choice.md`, `conceptual-model.md`, `logical-schema.md`, `normalization.md`, `assumptions.md`. Mermaid ER diagram included. |
+| 5. Revision | Existing model and user request | Validated new requirements/choice/model, new design version, re-rendered six Markdown files, `changelog.md`, invalidated approval. Old SQL never reused for new version. |
+| 6. SQL | Current explicitly approved version | `schema.sql` and `seed.sql` only after table-coverage checks; optional real SQLite in-memory execution and error-feedback retry. |
 
-## 3. Stage contracts
+## Model and artifact ownership
 
-### Stage 1 — System intake
+`Session` stores the original description, interview rounds, consolidated requirements and latest DBMS choice. `DesignVersion.model` stores tables, columns, keys, constraints, indexes, relationships, functional dependencies, normal-form claims, assumptions, ambiguities and business rules. The deterministic renderers produce documentation from this state. SQL is synthesized using an LLM from the approved structured model and checked separately.
 
-**Input:** user free-text system description.
+All generated Markdown files go into `output/<session-id>/v<version>/`. After approval, SQL for that version is added to that directory. `output/<session-id>/changelog.md` documents versions. `output/llm-calls.jsonl` stores an entry per LLM call attempt, including inputs, outputs or errors. The durable JSON state is stored in `.dba_agent/sessions/<uuid>.json` using atomic replacement.
 
-**Output:** `intake_summary` containing actors, candidate entities, processes,
-explicit requirements, ambiguities, and source quotations or references where
-available. Each inferred item is marked as an inference.
+## Approved-version invariant
 
-**Completion:** the summary is structurally valid and the user can inspect it.
-The user may correct it before the interview begins.
+`Session.approve()` records the active version. `Session.require_sql_approval()` rejects SQL generation if state is not `APPROVED` or the approval refers to a different version. `Session.revise()` invalidates approval. `Session.mark_sql_generated()` is invoked only after SQL passes its configured checks. These checks do not prove all business rules or normal forms are correct.
 
-### Stage 2 — Requirements interview
+## Known boundaries
 
-**Input:** accepted intake summary and prior interview answers.
-
-**Output:** question/answer rounds and `requirements.md`. Requirements receive
-stable IDs and are grouped into these mandatory categories: entities and
-attributes; relationships and cardinalities; volume and growth; read/write and
-reporting patterns; transactions, consistency, and concurrency; security, roles,
-and privacy; business rules and constraints.
-
-**Completion:** every category has an answer or an explicit unresolved item, and
-at least one follow-up round has been completed. The agent may stop only when it
-has enough information to make a defensible DBMS recommendation; unresolved
-critical contradictions block completion.
-
-### Stage 3 — DBMS selection
-
-**Input:** completed requirements and assumptions.
-
-**Output:** selected DBMS, comparison table for PostgreSQL, MySQL/MariaDB,
-SQLite, and SQL Server, decision rationale, rejected alternatives, and
-`dbms-choice.md`.
-
-**Completion:** the selected DBMS is supported, each major requirement is linked
-to evidence in the decision, and the user can inspect the recommendation.
-
-The domain representation uses `Session.select_dbms()` and stores a
-`dbms_choice` object with these fields:
-
-* `selected` — one of the four supported DBMS names.
-* `rationale` — the overall recommendation.
-* `comparison` — strengths, limitations, and fit assessment for every supported DBMS.
-* `rejected` — a reason for each alternative to the selected DBMS.
-* `evidence` — one explanation for each mandatory interview category.
-
-`Session.dbms_choice_markdown()` renders this validated record to
-`dbms-choice.md`.
-
-### Stage 4 — Design documentation
-
-**Input:** requirements, DBMS choice, and the authoritative design model.
-
-**Output:** `conceptual-model.md`, `logical-schema.md`, `normalization.md`, and
-`assumptions.md`. The conceptual document contains a Mermaid ER diagram. The
-logical document includes types, keys, constraints, indexes, and a relational
-schema diagram.
-
-**Completion:** cross-artifact validation passes. Every entity and relationship
-maps consistently to the logical model; every referenced key exists; and every
-intentional denormalization is justified.
-
-### Stage 5 — Revision loop
-
-**Input:** user change request and current design version.
-
-**Output:** proposed structured change, a new validated design version, regenerated
-affected artifacts, and a `changelog.md` entry recording what changed, why, and
-which files were affected.
-
-**Completion:** the user sees the revised artifacts. The design remains in a
-review state until explicitly approved. The agent must not silently edit only the
-document named in the request.
-
-### Stage 6 — SQL generation
-
-**Input:** explicitly approved design version.
-
-**Output:** DBMS-specific `schema.sql` and realistic `seed.sql`.
-
-**Completion:** generated SQL passes static consistency checks. Execution against
-a fresh instance of the selected DBMS is a separate reported check; it must not
-be claimed unless actually run. Seed data must populate every table, respect
-foreign keys and constraints, and include meaningful optional, many-to-many,
-status, and edge-case data where applicable.
-
-## 4. Transition guards
-
-| Transition | Required guard |
-|---|---|
-| Intake → Interview | Valid intake summary exists. |
-| Interview → DBMS selection | All seven categories covered; follow-up round completed; no unresolved critical contradiction. |
-| DBMS selection → Design | Supported DBMS and rationale validated. |
-| Design → Review | All required documents generated and cross-validated. |
-| Review → SQL | Explicit approval of the current design version. |
-| Any revision → Review | New version passes validation and approval is cleared. |
-| SQL generation → SQL execution claim | Actual execution result is recorded for the selected DBMS. |
-
-## 5. Artifact ownership
-
-The structured state owns facts. Renderers own files:
-
-| Artifact | Source of truth |
-|---|---|
-| `requirements.md` | Interview requirements and assumptions |
-| `dbms-choice.md` | DBMS decision record |
-| `conceptual-model.md` | Entities and relationships |
-| `logical-schema.md` | Tables, columns, keys, constraints, indexes |
-| `normalization.md` | Functional dependencies and normal-form analysis |
-| `assumptions.md` | Explicit assumptions and unresolved ambiguities |
-| `changelog.md` | Versioned revision records |
-| `schema.sql` / `seed.sql` | Approved logical model plus selected dialect |
-
-
+All prompt steps require a model speaking an OpenAI-compatible chat-completions API; other providers require an adapter. A live integration run against that provider has not been performed as part of this revision. The optional real DBMS execution path is currently **SQLite only**, not PostgreSQL, MariaDB/MySQL or SQL Server. Static SQL matching is intentionally a lightweight guard and must not be described as cross-dialect SQL validation. The separately supplied official `scenario.md` was not present in the uploaded archive.

@@ -1,0 +1,17 @@
+digraph A {
+  graph [rankdir=LR, bgcolor="white", fontname="DejaVu Sans", pad="0.3", nodesep="0.52", ranksep="0.78", label="DBA Agent — Implementation Architecture", labelloc="t", fontsize=18, fontcolor="#172C45"];
+  node [shape=box, style="rounded,filled", color="#D4E2EC", fillcolor="#F3F7FA", fontname="DejaVu Sans", fontsize=11, margin="0.21,0.14"];
+  edge [color="#7692A3", arrowsize=0.72];
+  cli [label="CLI\ncli.py", fillcolor="#E1F2F0"];
+  service [label="AgentService\nservice.py", fillcolor="#D9E9F7"];
+  state [label="Session + DesignVersion\nsession.py", fillcolor="#EAF0FF"];
+  store [label="JSON SessionStore\natomic persistence", fillcolor="#F5F2E9"];
+  llm [label="LLMClient\nllm.py", fillcolor="#EDE6FA"];
+  prompts [label="Prompt templates\n*.txt", fillcolor="#F3ECFD"];
+  provider [label="LLM provider\nchat/completions", fillcolor="#F3ECFD"];
+  validate [label="model.py + interview.py\ninput validation", fillcolor="#E9F5EB"];
+  render [label="render.py\nMarkdown + Mermaid", fillcolor="#FFF2DD"];
+  sql [label="sql.py\nSQL checks + SQLite", fillcolor="#FFF2DD"];
+  output [label="Versioned artifacts\nchangelog + logs", fillcolor="#FAE9E9"];
+  cli -> service; service -> state; state -> store; service -> llm; llm -> prompts; llm -> provider; service -> validate; service -> render; service -> sql; render -> output; sql -> output; llm -> output [style=dotted, label="logs", fontsize=9];
+}
