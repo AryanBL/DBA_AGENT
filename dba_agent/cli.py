@@ -1,4 +1,4 @@
-"""Minimal recoverable CLI: new / continue / status / revise / approve / sql."""
+"""Interactive workspace and scriptable commands for the DBA Agent."""
 from __future__ import annotations
 
 import argparse
@@ -26,7 +26,10 @@ def show(session) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DBA Agent: structured database-design assistant")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("interactive", help="open the guided terminal workspace (default in a terminal)")
+    remove = sub.add_parser("delete", help="delete one saved session")
+    remove.add_argument("session_id")
     start = sub.add_parser("new", help="create a new session from a natural-language description")
     start.add_argument("description", help="system description in plain text")
     advance = sub.add_parser("continue", help="resume incomplete LLM stages and show questions")
@@ -45,9 +48,18 @@ def main(argv: list[str] | None = None) -> int:
     sql.add_argument("session_id")
     sql.add_argument("--verify-sqlite", action="store_true", help="really execute schema and seed in in-memory SQLite")
     args = parser.parse_args(argv)
+    if args.command is None and not sys.stdin.isatty():
+        parser.error("choose a command or use 'interactive' to open the workspace")
     try:
         agent = AgentService(Config.from_env())
-        if args.command == "new":
+        if args.command in (None, "interactive"):
+            from .terminal import run
+
+            return run(agent)
+        elif args.command == "delete":
+            agent.delete(args.session_id)
+            print(f"Deleted session {args.session_id}")
+        elif args.command == "new":
             show(agent.create(args.description))
         elif args.command == "continue":
             show(agent.advance(args.session_id))

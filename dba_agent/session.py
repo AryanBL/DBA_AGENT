@@ -114,6 +114,8 @@ class Session:
             raise StateError("every interview answer must be a nonempty string")
         self.interview_rounds.append({"questions": list(questions), "answers": dict(answers)})
         self.pending_questions = []
+        if self.interview_assessment:
+            self.metadata["last_assessment"] = self.interview_assessment
         self.interview_assessment = {}
         self.touch()
 
@@ -280,3 +282,11 @@ class SessionStore:
             raise StateError(f"session not found: {session_id}") from exc
         except json.JSONDecodeError as exc:
             raise StateError(f"invalid JSON for session {session_id}: {exc}") from exc
+
+    def delete(self, session_id: str) -> None:
+        """Delete one persisted session after its exact UUID has been validated."""
+        destination = self.path_for(session_id)
+        try:
+            destination.unlink()
+        except FileNotFoundError as exc:
+            raise StateError(f"session not found: {session_id}") from exc

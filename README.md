@@ -11,12 +11,13 @@ An LLM-powered, command-line assistant that develops relational database designs
 5. **Revision:** Convert natural-language changes to an updated full model, regenerate the affected documents, preserve prior version folders, record a change log and invalidate previous approval.
 6. **SQL:** Require explicit approval, generate DBMS-specific `schema.sql` and `seed.sql`, run table-coverage checks and support **real SQLite in-memory execution, schema-catalog comparisons and foreign-key validation** (optional). A bounded SQL repair loop passes error feedback to the model.
 
-**Limitations:** This implementation has not been tested with a live hosted LLM in this environment. Only SQLite SQL execution is automated; PostgreSQL, MySQL/MariaDB and SQL Server must be tested using their own servers before claiming executable correctness. Structural checks cannot prove 3NF, completeness, performance, or that generated SQL faithfully implements every rule. No project-specific `scenario.md` was supplied with the source archive. The official scenario run, architecture report and critique report remain separate submission tasks.
+**Limitations:** Kilo Gateway connectivity and the opening structured workflow have been tested against the live `kilo-auto/free` endpoint, but the complete included test scenario has not been run end to end against a hosted model. Only SQLite SQL execution is automated; PostgreSQL, MySQL/MariaDB and SQL Server must be tested using their own servers before claiming executable correctness. Structural checks cannot prove 3NF, completeness, performance, or that generated SQL faithfully implements every rule. The final scenario run, architecture report and critique report remain separate submission tasks.
 
 ## Requirements
 
 - Python 3.10+.
-- Network access and a valid API key for an **OpenAI-compatible `/chat/completions` endpoint**; no LangChain dependency.
+- Network access to the configured OpenAI-compatible gateway and credentials for its selected model.
+- The transport remains compatible with other **OpenAI-compatible `/chat/completions` endpoints**; no LangChain dependency.
 - SQLite is included with Python for optional executable tests. No external database service is necessary for the mocked tests.
 
 ## Installation
@@ -30,12 +31,12 @@ python -m unittest discover -v
 
 ## Provider configuration
 
-The example values below are placeholders. Set them as environment variables (the `.env.example` file is for reference only; it is **not auto-loaded**):
+The defaults use the configured gateway's DeepSeek V4.1 Flash model ID. Override the endpoint and exact model ID with environment variables. `.env.example` is a reference and is **not auto-loaded**.
 
 ```bash
-export DBA_AGENT_BASE_URL="https://api.openai.com/v1"
-export DBA_AGENT_MODEL="YOUR_MODEL_ID"
-export DBA_AGENT_API_KEY="YOUR_API_KEY"
+export DBA_AGENT_BASE_URL="https://api.gapgpt.app/v1"
+export DBA_AGENT_MODEL="gapgpt-deepseek-v4.1-flash"
+# Set DBA_AGENT_API_KEY privately in your shell or secret manager.
 # optional:
 export DBA_AGENT_OUTPUT_DIR="output"
 export DBA_AGENT_STATE_DIR=".dba_agent/sessions"
@@ -44,14 +45,53 @@ export DBA_AGENT_STATE_DIR=".dba_agent/sessions"
 On PowerShell:
 
 ```powershell
-$env:DBA_AGENT_BASE_URL="https://api.openai.com/v1"
-$env:DBA_AGENT_MODEL="YOUR_MODEL_ID"
-$env:DBA_AGENT_API_KEY="YOUR_API_KEY"
+$env:DBA_AGENT_BASE_URL="https://api.gapgpt.app/v1"
+$env:DBA_AGENT_MODEL="gapgpt-deepseek-v4.1-flash"
+# Set DBA_AGENT_API_KEY privately in your environment.
 ```
 
-Switch API gateway or model through these variables; code changes are unnecessary **when the gateway speaks the compatible chat-completions protocol**. API keys are transmitted in an Authorization header and are not written into the call log. Input and output text **are** stored in local logs; do not submit sensitive personal data without appropriate safeguards.
+`DBA_AGENT_BASE_URL`, `DBA_AGENT_MODEL`, and `DBA_AGENT_API_KEY` configure the provider without source changes. The gateway must support `/chat/completions`. `KILO_API_KEY` remains a legacy fallback when `DBA_AGENT_API_KEY` is unset. Keys are sent in the Authorization header, excluded from configuration representations, and redacted from new call and validation logs and errors. Inputs and outputs still contain workflow data. Existing historical logs are left intact.
+
+Provider model names are gateway-specific. The DeepSeek ID above comes from the project's existing configuration and has not been verified with a live paid request. Set both URL and model to switch back to another gateway.
+
+## Token efficiency and usage
+
+Each `output/llm-calls.jsonl` entry includes its session ID, provider `usage`, normalized `accounting`, `usage_source`, and error category. Provider prompt/completion counts take precedence individually. Missing counts use a UTF-8 byte length divided by four approximation, rounded up. Estimates include request serialization and cannot reproduce model-specific tokenization, hidden reasoning, billing, or charges for failed network attempts. Cache hits count as calls with zero new provider tokens. Client totals are available as `LLMClient.totals` and `session_totals`; cumulative session totals survive restarts in session `metadata.usage`. Old sessions begin accounting from their next call.
+
+Interview history remains complete in session state. A deterministic summary interns identical answer lines once and represents recent answers using fact and question indexes. It includes established facts, prior coverage judgments, unresolved topics, contradictions, original intake, and previously asked questions. Coverage is reassessed by the model. No answers are truncated. The latest summary is saved in `metadata.interview_summary`.
+
+After an answered round, one model call assesses coverage and returns the next 1–3 targeted follow-up questions. Full requirements are requested only when the model judges the interview ready and at least two rounds have been answered. This avoids sending the full interview context twice between rounds and repeatedly generating requirements that cannot yet be accepted. Assessment and questions are validated together before saving; `/continue` can retry failures using the saved answers. Older saved assessments still support generating questions separately. Restart a running app after updating code or `.env` settings.
+
+Completed requirements replace intake in later stages. Design and revision calls send only the selected DBMS instead of repeating its comparison report. Revisions retain the full model because arbitrary changes must propagate consistently across the entire design. An omitted DBMS choice in a revision response preserves the local complete choice. SQL generation sends table definitions, business rules, assumptions, ambiguities, and transaction/business requirements, omitting normalization and functional-dependency prose.
+
+Missing seed data for a table without foreign keys and missing SQLite indexes use append-only SQL fragments with the relevant table definition. Uncertain errors, FK-related seed repairs, syntax errors, and type mismatches fall back to complete scripts and the approved model. Assembled scripts always undergo the existing coverage checks and optional SQLite execution. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds this loop. `DBA_AGENT_LLM_ATTEMPTS` bounds network, JSON and stage-validation retries. Network retries reuse the same request; JSON and validation retries add a short correction message without copying the previous response.
+
+The cache lives only in the current `LLMClient` process. Keys hash actual serialized inputs, prompt contents, stage, model, base URL and credential identity. Service calls additionally hash full requirements, DBMS choice, authoritative design and version without transmitting that context. Changed inputs cannot hit the old entry. Cached JSON is revalidated and copied before returning. Invalid stage responses are excluded, and failed SQL validation clears the cache. Set `DBA_AGENT_CACHE_ENABLED=0` to disable it. Temperature zero supports repeatable requests but does not guarantee model determinism.
+
+On the existing library call data, compact payload bytes fell 34.7% for an assessment, 12.0% for a revision, and 31.0% for SQL generation inputs reconstructed from the saved model. Approximate input counts fell from 7,404 to 4,838, 9,495 to 8,354, and 7,971 to 5,504 respectively. These measurements compare payloads only, excluding system prompts and responses, and are not provider billing measurements.
 
 ## Running the CLI
+
+Open the interactive workspace from the project directory:
+
+```bash
+source venv/bin/activate
+dba-agent
+```
+
+Use the activation path for your environment (`venv` or `.venv`). The full-screen workspace has a session sidebar, conversation history, generated-file previews, and a multiline composer. Type a system description to start, or select a saved session in the sidebar. Paste the opening description from [scenario.md](scenario.md) for the library scenario. Enter sends a message, Shift+Enter inserts a newline, Ctrl+N starts a session, Ctrl+B toggles the sidebar, and Ctrl+Q exits. Completed interview rounds and workflow checkpoints are saved automatically.
+
+Answer interview questions in the composer. When a design is ready, select a file to preview it, type a revision request, or use `/approve`. Approval opens a confirmation dialog. Use `/sql` after approval to generate SQL, with execution verification enabled for SQLite. `/continue` resumes an interrupted model stage. `/help` lists all commands. The interface stays responsive during model calls and shows errors in the conversation.
+
+Use `dba-agent interactive` to open the workspace explicitly. The individual commands below also work for scripts and direct session access.
+
+To delete one saved session, use its UUID from the resume list:
+
+```bash
+dba-agent delete SESSION_UUID
+```
+
+In the workspace, select a session and type `/delete`, then confirm the dialog. This removes the persisted session record. Generated files under `output/SESSION_UUID/` are retained so design artifacts remain available.
 
 ```bash
 # 1. Start a new session (the tool prints its UUID and first questions)
@@ -124,6 +164,8 @@ output/
 To support another API protocol, create a new transport adapter implementing the interface of `LLMClient` rather than altering the stage logic. For production deployment, add database-backed concurrency controls, credential isolation, stronger model/schema validation, and real-DBMS execution for each dialect.
 
 ## Tests and sample run
+
+[`scenario.md`](scenario.md) contains a copy-ready community-library scenario, canonical answers for every mandatory interview category, common follow-up answers, run commands, and an acceptance checklist for a manual live test.
 
 ```bash
 python -m unittest discover -v

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
 from dba_agent import AgentService, Config, Stage, StateError
+from dba_agent.terminal import Workspace, Composer, Confirm, Preview
 from dba_agent.llm import LLMClient
 
 
@@ -71,7 +73,9 @@ class PipelineTests(unittest.TestCase):
 
     def through_design(self):
         intro = {"actors": ["Customer"], "entities": ["customer", "order"], "processes": ["place order"], "requirements": ["keep order records"], "ambiguities": []}
-        outputs = [intro, {"questions": ["How many customers?"]}, {**self.assessment, "ready": False}, {"questions": ["Does an order need a customer?"]}, self.assessment, dbms_choice(), {"design": model()}]
+        follow_up = {**self.assessment, "ready": False, "questions": ["Does an order need a customer?"]}
+        follow_up.pop("requirements")
+        outputs = [intro, {"questions": ["How many customers?"]}, follow_up, self.assessment, dbms_choice(), {"design": model()}]
         agent, transport = self.service(outputs)
         session = agent.create("Customers place orders")
         self.assertEqual(session.state, Stage.INTERVIEWING)
@@ -96,7 +100,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(result["verified_sqlite"])
         self.assertEqual(result["counts"], {"customers": 2, "orders": 3})
         self.assertEqual(agent.get(session.session_id).state, Stage.SQL_GENERATED)
-        self.assertEqual(len((self.cfg.output_dir / "llm-calls.jsonl").read_text().splitlines()), 8)
+        self.assertEqual(len((self.cfg.output_dir / "llm-calls.jsonl").read_text().splitlines()), 7)
 
     def test_revision_creates_new_version_and_invalidates_approval(self):
         agent, session = self.through_design()
@@ -113,6 +117,82 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("optional customer email", (self.cfg.output_dir / revised.session_id / "changelog.md").read_text())
         with self.assertRaises(StateError):
             agent.generate_sql(session.session_id)
+
+    def test_interactive_cli_resumes_and_generates_verified_sql(self):
+        intro = {
+            "actors": ["Customer"], "entities": ["customer", "order"],
+            "processes": ["place order"], "requirements": ["keep order records"], "ambiguities": [],
+        }
+        agent, _ = self.service([
+            intro, {"questions": ["How many customers?"]},
+            {**self.assessment, "ready": False, "questions": ["Does an order need a customer?"]},
+            self.assessment, dbms_choice(), {"design": model()}, self.sql,
+        ])
+        async def exercise():
+            app = Workspace(agent)
+            async with app.run_test(size=(120, 40)) as pilot:
+                async def send(text):
+                    app.query_one(Composer).load_text(text)
+                    await pilot.press("enter")
+                    await asyncio.wait_for(app.workers.wait_for_complete(), timeout=10)
+                    await pilot.pause()
+
+                await send("Customers place orders")
+                self.assertEqual(app.session.state, Stage.INTERVIEWING)
+                await send("1000")
+                await send("Yes")
+                self.assertEqual(app.session.state, Stage.DESIGN_READY)
+                await send("/review")
+                await pilot.press("enter")
+                self.assertIsInstance(app.screen, Preview)
+                await pilot.press("escape")
+                app.query_one(Composer).focus()
+                await send("/approve")
+                self.assertIsInstance(app.screen, Confirm)
+                await pilot.click("#confirm")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(app.session.state, Stage.APPROVED)
+                await send("/sql")
+                self.assertEqual(app.session.state, Stage.SQL_GENERATED)
+                await pilot.press("ctrl+b")
+                self.assertFalse(app.query_one("#sidebar").display)
+
+        asyncio.run(exercise())
+
+        path, = self.cfg.state_dir.glob("*.json")
+        session = agent.get(path.stem)
+        self.assertEqual(session.state, Stage.SQL_GENERATED)
+        self.assertEqual(len(session.interview_rounds), 2)
+        self.assertTrue(Path(session.design.artifacts["schema.sql"]).is_file())
+
+    def test_workspace_resumes_previews_and_confirms_deletion(self):
+        agent, session = self.through_design()
+
+        async def exercise():
+            app = Workspace(agent)
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.press("ctrl+l", "enter")
+                await pilot.pause()
+                self.assertEqual(app.session.session_id, session.session_id)
+                app.query_one(Composer).load_text("/delete")
+                await pilot.press("enter")
+                await pilot.click("#cancel")
+                self.assertEqual(agent.get(session.session_id).state, Stage.DESIGN_READY)
+                app.query_one(Composer).focus()
+                app.query_one(Composer).load_text("/delete")
+                await pilot.press("enter")
+                await pilot.click("#confirm")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertIsNone(app.session)
+                self.assertFalse(agent.store.path_for(session.session_id).exists())
+                self.assertTrue(Path(session.design.artifacts["requirements.md"]).is_file())
+                await pilot.resize_terminal(65, 25)
+                self.assertFalse(app.query_one("#sidebar").display)
+                self.assertGreater(app.query_one(Composer).size.width, 40)
+
+        asyncio.run(exercise())
 
     def test_bad_model_does_not_advance_state(self):
         agent, session = self.through_design()

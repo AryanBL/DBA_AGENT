@@ -7,7 +7,7 @@ name = "dba-agent-lab"
 version = "0.2.0"
 description = "LLM-powered database-design assistant with persistent staged workflow"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["rich>=13.7", "textual>=1.0,<2"]
 
 [project.scripts]
 dba-agent = "dba_agent.cli:main"

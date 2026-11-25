@@ -31,4 +31,4 @@ All generated Markdown files go into `output/<session-id>/v<version>/`. After ap
 
 ## Known boundaries
 
-All prompt steps require a model speaking an OpenAI-compatible chat-completions API; other providers require an adapter. A live integration run against that provider has not been performed as part of this revision. The optional real DBMS execution path is currently **SQLite only**, not PostgreSQL, MariaDB/MySQL or SQL Server. Static SQL matching is intentionally a lightweight guard and must not be described as cross-dialect SQL validation. The separately supplied official `scenario.md` was not present in the uploaded archive.
+All prompt steps require a model speaking an OpenAI-compatible chat-completions API; other protocols require an adapter. Kilo Gateway connectivity and the opening intake/interview workflow have been live-tested, but the complete `scenario.md` has not yet been run end to end against a hosted model. The optional real DBMS execution path is currently **SQLite only**, not PostgreSQL, MariaDB/MySQL or SQL Server. Static SQL matching is intentionally a lightweight guard and must not be described as cross-dialect SQL validation.

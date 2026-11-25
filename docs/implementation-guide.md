@@ -170,7 +170,7 @@ The CLI's `new "description"` calls `AgentService.create(description)`. That cre
 
 ### Stage 2 — Interview
 
-`AgentService.advance(id)` requests questions from `prompts/questions.txt` whenever the session is interviewing and no question is pending. The user answers them via `answer <id>` (interactive input) or `answer <id> --json answers.json`. `add_interview_round` persists the accepted round before the model is asked to assess completeness. If the model says not ready, the agent asks follow-up questions based on past answers. Even if a model prematurely says ready after only one round, the code **requires another answered round**. Only after the second or later round, complete coverage, no critical contradictions and an affirmative model assessment can `complete_requirements` run.
+`AgentService.advance(id)` requests initial questions from `prompts/questions.txt`. The user answers them via `answer <id>` (interactive input) or `answer <id> --json answers.json`. `add_interview_round` persists the accepted round before one call to `prompts/assess.txt` assesses completeness and returns 1–3 targeted follow-up questions when needed. Full requirements are requested only when ready after at least two answered rounds. Assessment and its next action are validated together before checkpointing. Older saved assessments can still resume with a separate question call. Even if a model says ready after only one round, the code **requires another answered round**. Only after the second or later round, complete coverage, no critical contradictions and an affirmative model assessment can `complete_requirements` run.
 
 A possible first round for an ordering system might ask about entities/attributes, customer-order cardinality, growth, query patterns, concurrent updates, access permissions and order constraints. A follow-up might ask whether an order can exist without a customer, how cancelled orders behave and how inventory transactions interact. These are illustrative questions, **not actual recorded LLM responses**.
 
@@ -211,7 +211,7 @@ A frozen dataclass containing `base_url`, `model`, `api_key`, state/output/promp
 
 ### `LLMClient` (`llm.py`)
 
-The constructor accepts a `Config` and optional injected `transport`. `_http()` makes a standard HTTP POST to `<base_url>/chat/completions` with an authorization header and the model/messages JSON. `ask(stage, prompt, payload)` reads the matching prompt text file, sends a request, parses a JSON-object reply, retries failed calls a limited number of times and writes **one JSONL record per attempt**: stage, prompt, attempt, model, input, output or error. `parse_json()` handles plain JSON and a fenced JSON object; `append_jsonl()` writes structured logs. The API key is not included in logs, but **user prompts, requirements and model responses are logged locally**, so access to output folders should be restricted when data is confidential.
+The constructor accepts a `Config` and optional injected `transport`. `_http()` makes a standard HTTP POST to `<base_url>/chat/completions` with the model/messages JSON; it includes a bearer authorization header only when an API key is configured, allowing eligible Kilo free models to be used anonymously. `ask(stage, prompt, payload)` reads the matching prompt text file, sends a request, parses a JSON-object reply, retries failed calls a limited number of times and writes **one JSONL record per attempt**: stage, prompt, attempt, model, input, output or error. `parse_json()` handles plain JSON and a fenced JSON object; `append_jsonl()` writes structured logs. The API key is not included in logs, but **user prompts, requirements and model responses are logged locally**, so access to output folders should be restricted when data is confidential.
 
 ### `AgentService` (`service.py`)
 
@@ -256,15 +256,16 @@ Constraints reflect business rules: `NOT NULL` requires a value, `UNIQUE` forbid
 
 ## 11. Installation and one complete command sequence
 
-The project requires Python 3.10+ and a valid key for a compatible LLM gateway. From the repository directory:
+The project requires Python 3.10+ and network access to a compatible LLM gateway. Kilo's eligible free models allow anonymous access; other models and gateways may require an API key. From the repository directory:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 python -m pip install -e .
-export DBA_AGENT_BASE_URL=https://api.openai.com/v1
-export DBA_AGENT_MODEL=YOUR_MODEL_ID
-export DBA_AGENT_API_KEY=YOUR_API_KEY
+export DBA_AGENT_BASE_URL=https://ai-gateway.kilo.ai/api/v1
+export DBA_AGENT_MODEL=kilo-auto/free
+# Optional for eligible free models; required for authenticated/paid models.
+# export DBA_AGENT_API_KEY=YOUR_KILO_GATEWAY_KEY
 python -m unittest discover -v
 ```
 
@@ -305,14 +306,14 @@ The test client injects a **scripted transport** rather than sending requests to
 | LLM-call attempt logging | Implemented | `output/llm-calls.jsonl`, including errors. |
 | Configurable model/provider | Implemented for compatible chat-completions APIs | Environment variables; other protocols need adapters. |
 | Git/README/output folders | README and organized output implemented | Zip contains source; commit/push to the student's repository is still their action. |
-| Complete official scenario output | Not yet demonstrated | The specification references a separate `scenario.md` that was not supplied. |
+| Complete scenario output | Not yet demonstrated | A comprehensive `scenario.md` is included, but its full live output still needs to be generated and reviewed. |
 | Short architecture report (max ~3 pages) | Not supplied as separate submission file | This comprehensive guide is **not** a substitute for the required concise report. |
 | Genuine critique of three flaws | Not supplied as separate submission file | Must identify actual flaws in a run, fix them, and document evidence. |
 | Bonus real-DBMS validation/repair loop | Partially implemented for SQLite | SQLite execution and repair are real; not demonstrated for PostgreSQL/MySQL/SQL Server. |
 
 ## 14. Design limitations and recommended next steps
 
-**First:** run an actual end-to-end test against the LLM gateway and the separately supplied official `scenario.md`. Inspect every stage and document; models can return invalid JSON or unsupported SQL even when deterministic validators are present.
+**First:** run an actual end-to-end test against the LLM gateway using the included `scenario.md`. Inspect every stage and document; models can return invalid JSON or unsupported SQL even when deterministic validators are present.
 
 **Second:** test generated `schema.sql` followed by `seed.sql` on a fresh instance of the *selected* DBMS, with keys/constraints enabled. For SQLite the implemented `--verify-sqlite` mode already does this. For PostgreSQL, MariaDB/MySQL or SQL Server, add a database-specific runner or test the outputs manually in an isolated instance; do not claim successful SQL execution from lexical checks alone.
 
