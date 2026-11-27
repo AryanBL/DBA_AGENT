@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dba_agent import Config, Session
-from dba_agent.context import interview_summary, repair_context, sql_design
+from dba_agent.context import interview_summary, sql_design
 from dba_agent.llm import LLMClient, LLMError, NetworkError
 from tests import test_pipeline as pipeline
 
@@ -137,16 +137,11 @@ class EfficiencyTests(unittest.TestCase):
         self.assertLess(len(json.dumps(summary)), len(json.dumps(session.interview_rounds)) / 2)
         self.assertEqual(len(Session.from_dict(session.to_dict()).interview_rounds), 6)
 
-    def test_reduced_sql_and_localized_repair(self):
+    def test_reduced_sql_design(self):
         design = pipeline.model()
         reduced = sql_design(design)
         self.assertNotIn("normalization", reduced)
         self.assertEqual(reduced["tables"], design["tables"])
-        local = repair_context("large schema", "large seed", design, "seed.sql does not populate customers", "SQLite")
-        self.assertEqual(local["mode"], "append_seed")
-        self.assertNotIn("previous_schema", local)
-        fallback = repair_context("schema", "seed", design, "unknown syntax failure", "SQLite")
-        self.assertEqual(fallback["design"], design)
 
 
 class PayloadTests(unittest.TestCase):
@@ -211,7 +206,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(saved.interview_assessment, {})
         self.assertEqual(saved.state, pipeline.Stage.INTERVIEWING)
 
-    def test_sqlite_verification_runs_only_after_generation(self):
+    def test_separate_sqlite_verification_checks_approved_indexes(self):
         fixture = pipeline.PipelineTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)

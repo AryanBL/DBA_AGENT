@@ -221,14 +221,57 @@ class PipelineTests(unittest.TestCase):
             agent.revise(session.session_id, "add new entity")
         self.assertEqual(agent.get(session.session_id).active_version, 1)
 
-    def test_sql_repair_uses_validation_error(self):
+    def test_sql_repair_appends_seed_for_missing_table(self):
         agent, session = self.through_design()
         agent.approve(session.session_id)
-        bad = {"schema_sql": self.sql["schema_sql"], "seed_sql": "INSERT INTO customers (customer_id,name) VALUES (1,'Jules');"}
-        agent.llm.transport = ScriptedTransport([bad, self.sql])
+        bad = {"schema_sql": self.sql["schema_sql"], "seed_sql": self.sql["seed_sql"].split("; ", 1)[0] + ";"}
+        fragment = self.sql["seed_sql"].split("; ", 1)[1]
+        agent.llm.transport = ScriptedTransport([bad, {"patches": {"append:seed": fragment}}])
         result = agent.generate_sql(session.session_id)
         self.assertEqual(result["attempts"], 2)
+        self.assertTrue(Path(result["seed"]).read_text().startswith(bad["seed_sql"]))
+        self.assertEqual(agent.llm.records[-1]["input"]["editable"], ["append:seed"])
         self.assertTrue((self.cfg.output_dir / "sql-validation.jsonl").exists())
+
+    def test_sql_repair_sends_only_failing_statements_and_shortens_followup(self):
+        agent, session = self.through_design()
+        agent.approve(session.session_id)
+        broken = dict(self.sql, seed_sql=self.sql["seed_sql"].replace("25.40", "'invalid'").replace("19.00", "-1"))
+        good_insert = self.sql["seed_sql"].split("; ", 1)[1]
+        bodies = []
+        responses = ScriptedTransport([broken, {"patches": {"seed:2": good_insert.replace("19.00", "-1")}},
+                                      {"patches": {"seed:2": good_insert}}])
+
+        def transport(url, key, body, timeout):
+            bodies.append(body)
+            return responses(url, key, body, timeout)
+
+        agent.llm.transport = transport
+        result = agent.generate_sql(session.session_id)
+        self.assertEqual(result["attempts"], 3)
+        self.assertEqual(Path(result["seed"]).read_text(), self.sql["seed_sql"] + "\n")
+        first, followup = [json.loads(body["messages"][1]["content"]) for body in bodies[1:]]
+        self.assertIn("Incompatible SQLite type", first["validation_error"])
+        self.assertIn("CHECK constraint failed", followup["validation_error"])
+        for repair in (first, followup):
+            self.assertEqual(set(repair["statements"]), {"seed:2", "schema:2"})
+            self.assertEqual(repair["editable"], ["seed:2"])
+            self.assertNotIn("design", repair)
+        self.assertLess(len(bodies[2]["messages"][0]["content"]), len(bodies[1]["messages"][0]["content"]))
+
+    def test_sql_repair_rejects_unrelated_edits_and_leaves_failed_artifacts_unpublished(self):
+        agent, session = self.through_design()
+        agent.approve(session.session_id)
+        broken = dict(self.sql, seed_sql=self.sql["seed_sql"].replace("25.40", "-1"))
+        wrong_patch = {"patches": {"schema:1": "CREATE TABLE unwanted(x INT);"}}
+        agent.llm.transport = ScriptedTransport([broken, wrong_patch, wrong_patch])
+        with self.assertRaisesRegex(StateError, "SQL failed validation after 3 attempt"):
+            agent.generate_sql(session.session_id)
+        self.assertIn("patch_error", agent.llm.records[-1]["input"])
+        self.assertEqual(agent.get(session.session_id).state, Stage.APPROVED)
+        folder = self.cfg.output_dir / session.session_id / "v1"
+        self.assertFalse((folder / "schema.sql").exists())
+        self.assertFalse((folder / "seed.sql").exists())
 
 
 if __name__ == "__main__":

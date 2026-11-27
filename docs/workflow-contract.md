@@ -17,7 +17,7 @@ The interview remains in `INTERVIEWING` for additional rounds. A successful revi
 | 3. DBMS | Completed requirements | Selection of PostgreSQL, MySQL/MariaDB, SQLite, or SQL Server, comparison of all four and rejection reasons for other three. |
 | 4. Design | Requirements, DBMS | One validated structured model and deterministic `requirements.md`, `dbms-choice.md`, `conceptual-model.md`, `logical-schema.md`, `normalization.md`, `assumptions.md`. Mermaid ER diagram included. |
 | 5. Revision | Existing model and user request | Validated new requirements/choice/model, new design version, re-rendered six Markdown files, `changelog.md`, invalidated approval. Old SQL never reused for new version. |
-| 6. SQL | Current explicitly approved version | `schema.sql` and `seed.sql` after table-coverage checks; no database execution during generation. |
+| 6. SQL | Current explicitly approved version | `schema.sql` and `seed.sql` after coverage checks and successful execution in an isolated database. Failures can trigger scoped LLM repairs. |
 | Execution | Separate user command after both SQL files exist | PostgreSQL via `psql`, MySQL/MariaDB via `mysql` or `mariadb`, and SQL Server via `sqlcmd` in a running container with a locally available image; SQLite into a selected database file. |
 
 ## Model and artifact ownership
@@ -32,4 +32,4 @@ All generated Markdown files go into `output/<session-id>/v<version>/`. After ap
 
 ## Known boundaries
 
-All prompt steps require a model speaking an OpenAI-compatible chat-completions API; other protocols require an adapter. Kilo Gateway connectivity and the opening intake/interview workflow have been live-tested, but the complete `scenario.md` has not yet been run end to end against a hosted model. Server execution requires a running container with a local image and is not part of the generation or repair loop. SQLite execution requires no image; it uses Python's built-in driver. Static SQL matching is intentionally a lightweight guard and must not be described as cross-dialect SQL validation.
+All prompt steps require a model speaking an OpenAI-compatible chat-completions API. Other protocols require an adapter. Kilo Gateway connectivity and the opening intake and interview workflow have been live-tested. A full hosted-model run of `scenario.md` remains pending. SQL generation validates server SQL in a disposable container built from a local image and validates SQLite SQL with Python's built-in driver in memory. The separate execution command applies validated artifacts to the user-selected database.

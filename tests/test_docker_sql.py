@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dba_agent.docker_sql import execute_docker_sql
+from dba_agent.docker_validation import _execution_script, _native_error, docker_seed_validator
 from dba_agent.session import StateError
+from dba_agent.sql_validation import SQLArtifacts
 
 
 def result(code=0, output=""):
@@ -88,6 +90,33 @@ class DockerSqlTests(unittest.TestCase):
                                     for item in seen))
                 self.assertTrue(all(item[2] == "secret" and "secret" not in item[0] for item in seen))
                 self.assertTrue(output["executed"])
+
+
+class DockerValidationTests(unittest.TestCase):
+    def test_native_errors_point_to_the_statement_in_the_failed_batch(self):
+        artifacts = SQLArtifacts("", "INSERT INTO items VALUES (1);\nGO\n"
+                                     "INSERT INTO items VALUES (2); INSERT INTO items VALUES (2);\nGO\n", "SQL Server")
+        script, locations = _execution_script(artifacts, "seed", "mark_")
+        self.assertIn("PRINT 'mark_1';\nGO", script)
+        self.assertEqual(locations, [(0, 1), (1, 1), (1, 2)])
+        result = subprocess.CompletedProcess([], 1, "mark_0\nmark_1\n",
+                                             "Msg 2627, Level 14, State 1, Server test, Line 2\nDuplicate key.\n")
+        conflict = _native_error("SQL Server", "seed", result, "mark_", locations)
+        self.assertEqual(conflict.statement, 2)
+        self.assertEqual(str(conflict), "seed.sql: Duplicate key.")
+
+    def test_disposable_server_uses_local_image_and_cleans_up_on_failure(self):
+        with patch("dba_agent.docker_validation._docker", return_value=result()) as docker, \
+                patch("dba_agent.docker_validation.database_client", return_value="psql"), \
+                patch("dba_agent.docker_validation.DockerSeedValidator._run", return_value=result()):
+            with self.assertRaisesRegex(StateError, "some failure"):
+                with docker_seed_validator("PostgreSQL", "postgres:local"):
+                    raise StateError("some failure")
+            launch, cleanup = [call.args for call in docker.call_args_list]
+            self.assertIn("--pull=never", launch)
+            self.assertIn("--network=none", launch)
+            self.assertEqual(launch[-1], "postgres:local")
+            self.assertEqual(cleanup, ("rm", "-f", "-v", launch[launch.index("--name") + 1]))
 
 
 if __name__ == "__main__":

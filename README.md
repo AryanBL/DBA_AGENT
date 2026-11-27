@@ -9,7 +9,7 @@ An LLM-powered, command-line assistant that develops relational database designs
 3. **DBMS selection:** Choose from PostgreSQL, MySQL/MariaDB, SQLite and SQL Server, including a comparison table and rejection reasons.
 4. **Documentation:** Validate one structured design model, then deterministically render requirements, DBMS decision, Mermaid ER diagrams, logical schema, normalization analysis and assumptions.
 5. **Revision:** Convert natural-language changes to an updated full model, regenerate the affected documents, preserve prior version folders, record a change log and invalidate previous approval.
-6. **SQL:** Require explicit approval, generate DBMS-specific `schema.sql` and `seed.sql`, and run table-coverage checks. A separate user command executes saved PostgreSQL, MySQL/MariaDB, or SQL Server files in an already-running container whose image is local. For SQLite, it writes to a user-selected database file; an in-memory verification command is also available.
+6. **SQL.** Require explicit approval, generate DBMS-specific `schema.sql` and `seed.sql`, and test the scripts together in an isolated database before saving them. A separate user command applies the saved files to a running server container or a selected SQLite file.
 
 **Limitations:** Kilo Gateway connectivity and the opening structured workflow have been tested against the live `kilo-auto/free` endpoint, but the complete included test scenario has not been run end to end against a hosted model. Server execution requires an existing running container and a locally available image. Structural checks cannot prove 3NF, completeness, performance, or that generated SQL faithfully implements every rule. The final scenario run, architecture report and critique report remain separate submission tasks.
 
@@ -18,7 +18,7 @@ An LLM-powered, command-line assistant that develops relational database designs
 - Python 3.10+.
 - Network access to the configured OpenAI-compatible gateway and credentials for its selected model.
 - The transport remains compatible with other **OpenAI-compatible `/chat/completions` endpoints**; no LangChain dependency.
-- SQLite is included with Python for optional executable tests. No external database service is necessary for the mocked tests.
+- SQLite is included with Python. Generating SQL for a server DBMS requires Docker and a local image for that DBMS. The offline tests run without Docker.
 
 ## Installation
 
@@ -64,7 +64,9 @@ After an answered round, one model call assesses coverage and returns the next 1
 
 Completed requirements replace intake in later stages. Design and revision calls send only the selected DBMS instead of repeating its comparison report. Revisions retain the full model because arbitrary changes must propagate consistently across the entire design. An omitted DBMS choice in a revision response preserves the local complete choice. SQL generation sends table definitions, business rules, assumptions, ambiguities, and transaction/business requirements, omitting normalization and functional-dependency prose.
 
-Missing seed data for a table without foreign keys can use append-only SQL fragments with the relevant table definition. Uncertain errors, FK-related seed repairs, syntax errors, and type mismatches fall back to complete scripts and the approved model. Assembled scripts undergo coverage checks during generation; database execution happens only through a later user command. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds the static repair loop. `DBA_AGENT_LLM_ATTEMPTS` bounds network, JSON and stage-validation retries. Network retries reuse the same request; JSON and validation retries add a short correction message without copying the previous response.
+During SQL generation, the selected engine runs the schema and seed in a fresh database with constraints enabled. SQLite also checks stored values against common declared types. On failure the model receives the database error, the affected statements, and any related definitions. The first repair call gives the full patch instructions. Later calls use a shorter prompt. The program applies only patches to the listed statement IDs and tests the complete pair again. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds generation and repair attempts. `DBA_AGENT_LLM_ATTEMPTS` bounds retries for network, JSON, and response validation errors.
+
+Server validation uses a disposable Docker container with no external network and no connection to the deployment database. The default local images are `postgres:latest`, `mariadb:lts`, and `mcr.microsoft.com/mssql/server:2022-latest`. Set `DBA_AGENT_SQL_VALIDATION_IMAGE` to use another already-local image, such as MySQL or the version used in deployment. SQL Server validation requires `ACCEPT_EULA=Y` in the app's environment. SQLite validation runs in memory.
 
 The cache lives only in the current `LLMClient` process. Keys hash actual serialized inputs, prompt contents, stage, model, base URL and credential identity. Service calls additionally hash full requirements, DBMS choice, authoritative design and version without transmitting that context. Changed inputs cannot hit the old entry. Cached JSON is revalidated and copied before returning. Invalid stage responses are excluded, and failed SQL validation clears the cache. Set `DBA_AGENT_CACHE_ENABLED=0` to disable it. Temperature zero supports repeatable requests but does not guarantee model determinism.
 
@@ -162,8 +164,9 @@ output/
 - `dba_agent/llm.py`: provider adapter, prompt file loading, JSON response parsing, per-attempt logs.
 - `dba_agent/service.py`: orchestration, checkpoint/retry, revision and SQL pipeline.
 - `dba_agent/render.py`: deterministic file output and Mermaid diagrams.
-- `dba_agent/sql.py`: lexical coverage and SQLite execution checks.
+- `dba_agent/sql.py`, `dba_agent/sql_validation.py`, and `dba_agent/sql_statements.py` handle SQLite execution, conflict detection, and statement-level repairs.
 - `dba_agent/docker_sql.py`: local-image checks and container execution with `psql`, `mysql`/`mariadb`, or `sqlcmd`.
+- `dba_agent/docker_validation.py` runs native validation in disposable database containers.
 - `dba_agent/cli.py`: command-line interface.
 - `dba_agent/prompts/`: human-readable prompts for each model task.
 - `tests/`: deterministic offline tests, including executable SQLite SQL.
@@ -183,4 +186,4 @@ The test suite uses an injected scripted model (not a real LLM) and validates ac
 
 ## Assignment tracking
 
-The implementation covers the six required workflow stages at a functional prototype level, including persistence, external prompts, provider configuration and local logs. **Still needed before final submission:** an official end-to-end scenario run, the max-three-page architecture report, a genuine critique of at least three design flaws and remediations (or an account of checks performed), and live executable verification against the actual chosen DBMS. The automatic repair loop uses static checks; later database execution does not feed errors back to the model.
+The implementation covers the six required workflow stages at a functional prototype level, including persistence, external prompts, provider configuration and local logs. **Still needed before final submission** are an official end-to-end scenario run, the max-three-page architecture report, a genuine critique of at least three design flaws and remediations (or an account of checks performed), and live executable verification against the actual chosen DBMS.

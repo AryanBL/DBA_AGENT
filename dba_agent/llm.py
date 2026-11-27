@@ -186,6 +186,13 @@ class LLMClient:
                 })
                 self.records.append(record)
                 append_jsonl(self.log_path, record)
+                # Second-resolution buckets retain exact-second aggregates while
+                # preserving each attempt in the existing detailed JSONL log.
+                second = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                append_jsonl(self.config.output_dir / "token-usage-per-second.jsonl", {
+                    "timestamp": second, "session_id": session_id,
+                    **accounting,
+                })
         if validation_error is not None:
             raise type(validation_error)(self.redact(str(validation_error))) from None
         raise LLMError(f"{stage} failed after {self.config.llm_attempts} attempt(s): {last_error}")

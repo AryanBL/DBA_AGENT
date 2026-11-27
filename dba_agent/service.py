@@ -1,18 +1,21 @@
 """Six-stage orchestration with saved checkpoints, versioning and artifact propagation."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .context import interview_summary, sql_design, repair_context
+from .context import interview_summary, sql_design
 from .docker_sql import execute_docker_sql
+from .docker_validation import docker_seed_validator
 from .interview import REQUIRED_CATEGORIES, validate_requirements
 from .llm import LLMClient, append_jsonl
 from .model import validate_dbms_choice, validate_design
 from .render import render_session, write_file
 from .session import Session, SessionStore, Stage, StateError
-from .sql import execute_sqlite, validate_sql_artifacts
+from .sql import execute_sqlite
+from .sql_validation import SQLArtifacts, SQLConflict, validate_sqlite_seed
 
 
 class AgentService:
@@ -170,32 +173,52 @@ class AgentService:
         dbms = session.dbms_choice["selected"]
         payload = {"dbms": dbms, "design": sql_design(session.design.model),
                    "requirements": {key: session.requirements[key] for key in ("business_rules", "transactions")}}
-        last_error = ""
-        for attempt in range(1, self.config.max_sql_attempts + 1):
-            stage = "sql" if attempt == 1 else "sql_repair"
-            response = self._ask(session, stage, stage, payload)
-            if payload.get("mode") == "append_seed" and isinstance(response.get("seed_fragment"), str):
-                seed += "\n" + response["seed_fragment"]
-            elif payload.get("mode") == "append_schema" and isinstance(response.get("schema_fragment"), str):
-                schema += "\n" + response["schema_fragment"]
+
+        def require_scripts(value: dict[str, Any]) -> None:
+            if any(not isinstance(value.get(key), str) for key in ("schema_sql", "seed_sql")):
+                raise StateError("Return schema_sql and seed_sql as SQL strings.")
+
+        with ExitStack() as resources:
+            validate_seed = validate_sqlite_seed
+            if dbms != "SQLite":
+                validator = resources.enter_context(docker_seed_validator(dbms, self.config.sql_validation_image))
+                validate_seed = validator.validate
+            response = self._ask(session, "sql", "sql", payload, require_scripts)
+            artifacts = SQLArtifacts(response["schema_sql"], response["seed_sql"], dbms)
+            for attempt in range(1, self.config.max_sql_attempts + 1):
+                patch_error = None
+                if attempt > 1:
+                    prompt = "sql_repair" if attempt == 2 else "sql_repair_followup"
+                    patch = self._ask(session, "sql_repair", prompt, payload)
+                    try:
+                        artifacts.apply(patch, payload["editable"])
+                    except StateError as exc:
+                        patch_error = self.llm.redact(str(exc))
+                if patch_error is not None:
+                    last_error = payload["patch_error"] = patch_error
+                else:
+                    try:
+                        artifacts.preflight(tables)
+                        validate_seed(artifacts, tables)
+                        break
+                    except SQLConflict as exc:
+                        payload = artifacts.repair_context(exc, session.design.model)
+                        last_error = payload["validation_error"] = self.llm.redact(str(exc))
+                self.llm.cache.clear()
+                append_jsonl(self.config.output_dir / "sql-validation.jsonl", self.llm.redact({
+                    "session_id": session_id, "version": session.active_version, "attempt": attempt,
+                    "dbms": dbms, "error": last_error, "error_kind": "validation",
+                }))
             else:
-                schema, seed = response.get("schema_sql"), response.get("seed_sql")
-            try:
-                validate_sql_artifacts(schema, seed, tables)
-                path = self.config.output_dir / session.session_id / f"v{session.active_version}"
-                # Only publish both files after checks pass, avoiding partially updated versions.
-                write_file(path / "schema.sql", schema)
-                write_file(path / "seed.sql", seed)
-                session.design.artifacts.update({"schema.sql": str(path / "schema.sql"), "seed.sql": str(path / "seed.sql")})
-                session.mark_sql_generated()
-                self._save(session)
-                return {"schema": str(path / "schema.sql"), "seed": str(path / "seed.sql"), "attempts": attempt}
-            except StateError as exc:
-                last_error = self.llm.redact(str(exc))
-                self.llm.cache.clear()  # Never reuse SQL that failed executable validation.
-                append_jsonl(self.config.output_dir / "sql-validation.jsonl", self.llm.redact({"session_id": session_id, "version": session.active_version, "attempt": attempt, "dbms": dbms, "error": last_error, "error_kind": "validation"}))
-                payload = repair_context(schema, seed, session.design.model, last_error, dbms)
-        raise StateError(f"SQL failed validation after {self.config.max_sql_attempts} attempt(s): {last_error}")
+                raise StateError(f"SQL failed validation after {self.config.max_sql_attempts} attempt(s): {last_error}")
+
+        path = self.config.output_dir / session.session_id / f"v{session.active_version}"
+        for file, source in artifacts.sources.items():
+            label = f"{file}.sql"
+            session.design.artifacts[label] = str(write_file(path / label, source))
+        session.mark_sql_generated()
+        self._save(session)
+        return {"schema": str(path / "schema.sql"), "seed": str(path / "seed.sql"), "attempts": attempt}
 
     def _generated_files(self, session: Session) -> tuple[Path, Path]:
         if session.state != Stage.SQL_GENERATED:

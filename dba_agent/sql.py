@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -74,9 +75,8 @@ def _check_sqlite_structure(connection: sqlite3.Connection, model: dict[str, Any
                 raise StateError(f"SQLite unique constraint missing on {name}({', '.join(unique)})")
 
 
-def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, Any] | None = None,
-                   database: Path | None = None) -> dict[str, int]:
-    """Execute and check seed in memory or in a user-selected SQLite file."""
+@contextmanager
+def sqlite_connection(database: Path | None = None, *, allow_fk_probe: bool = False):
     if database is not None and database.is_dir():
         raise StateError(f"SQLite database path is a directory: {database}; SQL was not executed.")
     try:
@@ -91,12 +91,25 @@ def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, 
             # destructive DDL, or disabling foreign-key enforcement during tests.
             if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_DROP_TABLE}:
                 return sqlite3.SQLITE_DENY
-            read_only = {"foreign_key_check", "table_info", "foreign_key_list", "index_list", "index_info"}
+            read_only = {"foreign_key_check", "table_info", "table_xinfo", "foreign_key_list", "index_list", "index_info"}
             if action == sqlite3.SQLITE_PRAGMA and str(arg1).lower() not in read_only:
+                if allow_fk_probe and arg1 == "defer_foreign_keys" and arg2 == "ON":
+                    return sqlite3.SQLITE_OK
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
         connection.set_authorizer(authorize)
+        yield connection
+    except sqlite3.Error as exc:
+        raise StateError(f"SQLite execution failed: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, Any] | None = None,
+                   database: Path | None = None) -> dict[str, int]:
+    """Execute and check seed in memory or in a user-selected SQLite file."""
+    with sqlite_connection(database) as connection:
         connection.executescript(schema)
         if design is not None:
             _check_sqlite_structure(connection, design)
@@ -108,7 +121,3 @@ def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, 
         if violations:
             raise StateError(f"SQLite foreign-key violations: {violations}")
         return counts
-    except sqlite3.Error as exc:
-        raise StateError(f"SQLite execution failed: {exc}") from exc
-    finally:
-        connection.close()

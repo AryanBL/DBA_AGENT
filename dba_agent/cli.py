@@ -8,6 +8,7 @@ import sys
 
 from .config import Config
 from .service import AgentService
+from .usage_analysis import analyze
 from .session import Stage, StateError
 
 
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DBA Agent: structured database-design assistant")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("interactive", help="open the guided terminal workspace (default in a terminal)")
+    sub.add_parser("usage", help="show app, session, stage and per-second token analysis")
     remove = sub.add_parser("delete", help="delete one saved session")
     remove.add_argument("session_id")
     start = sub.add_parser("new", help="create a new session from a natural-language description")
@@ -69,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "delete":
             agent.delete(args.session_id)
             print(f"Deleted session {args.session_id}")
+        elif args.command == "usage":
+            print(json.dumps(analyze(agent.config.output_dir / "llm-calls.jsonl"), indent=2))
         elif args.command == "new":
             show(agent.create(args.description))
         elif args.command == "continue":

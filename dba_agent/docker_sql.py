@@ -18,6 +18,38 @@ def _docker(*args: str) -> subprocess.CompletedProcess[str]:
         raise StateError("Docker did not respond in time; SQL was not executed.") from exc
 
 
+def database_client(dbms: str, container: str) -> str:
+    if dbms == "SQL Server":
+        for candidate in ("/opt/mssql-tools18/bin/sqlcmd", "/opt/mssql-tools/bin/sqlcmd"):
+            if _docker("exec", container, "test", "-x", candidate).returncode == 0:
+                return candidate
+        tool = "sqlcmd"
+    else:
+        for candidate in (("psql",) if dbms == "PostgreSQL" else ("mariadb", "mysql")):
+            if _docker("exec", container, candidate, "--version").returncode == 0:
+                return candidate
+        tool = "psql" if dbms == "PostgreSQL" else "mariadb or mysql client"
+    raise StateError(f"The local image for '{container}' has no {tool} utility; SQL was not executed.")
+
+
+def database_command(dbms: str, container: str, executable: str, database: str,
+                     username: str, password: str) -> tuple[list[str], dict[str, str]]:
+    secret_name = ("SQLCMDPASSWORD" if dbms == "SQL Server" else
+                   "PGPASSWORD" if dbms == "PostgreSQL" else "MYSQL_PWD")
+    environment = os.environ.copy()
+    environment[secret_name] = password
+    command = ["docker", "exec", "-i", "-e", secret_name, container, executable]
+    if dbms == "SQL Server":
+        command += ["-S", "localhost", "-d", database, "-U", username, "-b", "-C", "-i", "/dev/stdin"]
+    elif dbms == "PostgreSQL":
+        command += ["-X", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-d", database,
+                    "-U", username, "-f", "/dev/stdin"]
+    else:
+        command += ["--protocol=tcp", "--host=127.0.0.1", f"--database={database}",
+                    f"--user={username}", "--default-character-set=utf8mb4", "--batch"]
+    return command, environment
+
+
 def execute_docker_sql(
     schema: Path, seed: Path, *, dbms: str, container: str, database: str, username: str, password: str
 ) -> dict[str, Any]:
@@ -47,41 +79,9 @@ def execute_docker_sql(
             "No image was downloaded or installed; SQL was not executed."
         )
 
-    if dbms == "SQL Server":
-        executable = None
-        for candidate in ("/opt/mssql-tools18/bin/sqlcmd", "/opt/mssql-tools/bin/sqlcmd"):
-            if _docker("exec", container, "test", "-x", candidate).returncode == 0:
-                executable = candidate
-                break
-        if executable is None:
-            raise StateError(f"The local image for '{container}' has no sqlcmd utility; SQL was not executed.")
-    elif dbms == "PostgreSQL":
-        executable = "psql"
-        if _docker("exec", container, "psql", "--version").returncode != 0:
-            raise StateError(f"The local image for '{container}' has no psql utility; SQL was not executed.")
-    else:
-        executable = None
-        for candidate in ("mariadb", "mysql"):
-            if _docker("exec", container, candidate, "--version").returncode == 0:
-                executable = candidate
-                break
-        if executable is None:
-            raise StateError(f"The local image for '{container}' has no mariadb or mysql client; SQL was not executed.")
-
-    environment = os.environ.copy()
-    secret_name = ("SQLCMDPASSWORD" if dbms == "SQL Server" else
-                   "PGPASSWORD" if dbms == "PostgreSQL" else "MYSQL_PWD")
-    environment[secret_name] = password
+    executable = database_client(dbms, container)
+    command, environment = database_command(dbms, container, executable, database, username, password)
     for label, path in (("schema.sql", schema), ("seed.sql", seed)):
-        command = ["docker", "exec", "-i", "-e", secret_name, container, executable]
-        if dbms == "SQL Server":
-            command += ["-S", "localhost", "-d", database, "-U", username, "-b", "-C", "-i", "/dev/stdin"]
-        elif dbms == "PostgreSQL":
-            command += ["-X", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-d", database,
-                        "-U", username, "-f", "/dev/stdin"]
-        else:
-            command += ["--protocol=tcp", "--host=127.0.0.1", f"--database={database}",
-                        f"--user={username}", "--default-character-set=utf8mb4", "--batch"]
         try:
             with path.open("rb") as script:
                 completed = subprocess.run(command, stdin=script, capture_output=True, text=True,

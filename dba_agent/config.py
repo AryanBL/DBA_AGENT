@@ -39,6 +39,7 @@ class Config:
     max_interview_rounds: int = 6
     max_sql_attempts: int = 3
     cache_enabled: bool = True
+    sql_validation_image: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -61,4 +62,5 @@ class Config:
             max_interview_rounds=number("DBA_AGENT_MAX_INTERVIEW_ROUNDS", 6),
             max_sql_attempts=number("DBA_AGENT_MAX_SQL_ATTEMPTS", 3),
             cache_enabled=os.getenv("DBA_AGENT_CACHE_ENABLED", "1").lower() not in {"0", "false", "no"},
+            sql_validation_image=os.getenv("DBA_AGENT_SQL_VALIDATION_IMAGE", "").strip(),
         )

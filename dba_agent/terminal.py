@@ -13,6 +13,7 @@ from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, LoadingIndicator, OptionList, RichLog, Static, TextArea
 
@@ -108,6 +109,7 @@ class Workspace(App):
     #brand { width: 1fr; color: #68d5bf; text-style: bold; }
     #model { width: auto; color: #939faa; }
     #body { height: 1fr; }
+    #usage { width: 32; text-align: right; color: #68d5bf; }
     #sidebar { width: 30; padding: 1; background: #171c22; border-right: solid #28313b; }
     .section { color: #939faa; margin: 0 1; text-style: bold; }
     #new { width: 100%; height: 3; }
@@ -160,6 +162,7 @@ class Workspace(App):
         with Horizontal(id="top"):
             yield Static("◈  DBA AGENT", id="brand")
             yield Static(Text(self.agent.config.model), id="model")
+            yield Static("Tokens: 0", id="usage")
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Button("＋ New session", id="new")
@@ -185,7 +188,17 @@ class Workspace(App):
 
     async def on_mount(self) -> None:
         self.refresh_sessions()
+        self.set_interval(1, self.refresh_usage)
         self.query_one(Composer).focus()
+
+    def refresh_usage(self) -> None:
+        if self.session:
+            try:
+                usage = self.query_one("#usage", Static)
+                count = self.agent.get(self.session.session_id).metadata.get("usage", {}).get("total_tokens", 0)
+                usage.update(f"Tokens: {count:,}")
+            except (NoMatches, ValueError, OSError):
+                pass
 
     def on_resize(self, event: events.Resize) -> None:
         if self.query("#sidebar"):
@@ -214,6 +227,7 @@ class Workspace(App):
 
     async def show_session(self, session: Session, history: bool = False) -> None:
         self.session = session
+        self.refresh_usage()
         if history:
             self.answers = {}
             await self.query_one("#conversation").remove_children()
