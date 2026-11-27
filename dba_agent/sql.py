@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from .session import StateError
@@ -73,9 +74,15 @@ def _check_sqlite_structure(connection: sqlite3.Connection, model: dict[str, Any
                 raise StateError(f"SQLite unique constraint missing on {name}({', '.join(unique)})")
 
 
-def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, Any] | None = None) -> dict[str, int]:
-    """Execute and check seed in-memory. Optionally compare schema against design."""
-    connection = sqlite3.connect(":memory:")
+def execute_sqlite(schema: str, seed: str, tables: list[str], design: dict[str, Any] | None = None,
+                   database: Path | None = None) -> dict[str, int]:
+    """Execute and check seed in memory or in a user-selected SQLite file."""
+    if database is not None and database.is_dir():
+        raise StateError(f"SQLite database path is a directory: {database}; SQL was not executed.")
+    try:
+        connection = sqlite3.connect(str(database) if database is not None else ":memory:")
+    except sqlite3.Error as exc:
+        raise StateError(f"Could not open SQLite database: {exc}; SQL was not executed.") from exc
     try:
         connection.execute("PRAGMA foreign_keys=ON")
 

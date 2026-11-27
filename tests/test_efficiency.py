@@ -211,7 +211,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(saved.interview_assessment, {})
         self.assertEqual(saved.state, pipeline.Stage.INTERVIEWING)
 
-    def test_localized_index_repair_executes_complete_scripts(self):
+    def test_sqlite_verification_runs_only_after_generation(self):
         fixture = pipeline.PipelineTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -219,15 +219,13 @@ class PayloadTests(unittest.TestCase):
         agent.approve(session.session_id)
         broken = dict(fixture.sql)
         broken["schema_sql"] = broken["schema_sql"].split("CREATE INDEX")[0]
-        responses = iter([broken, {"schema_fragment": "CREATE INDEX idx_order_customer ON orders(customer_id);"}])
+        responses = iter([broken])
         agent.llm.transport = lambda *args: json.dumps(next(responses))
-        result = agent.generate_sql(session.session_id, verify_sqlite=True)
-        self.assertTrue(result["verified_sqlite"])
-        self.assertEqual(result["attempts"], 2)
-        repair = agent.llm.records[-1]["input"]
-        self.assertEqual(repair["mode"], "append_schema")
-        self.assertNotIn("previous_schema", repair)
-        self.assertNotIn("design", repair)
+        result = agent.generate_sql(session.session_id)
+        self.assertEqual(result["attempts"], 1)
+        with self.assertRaises(pipeline.StateError) as error:
+            agent.verify_sqlite(session.session_id)
+        self.assertIn("SQLite index missing", str(error.exception))
 
     def test_stage_payloads_and_persisted_usage(self):
         fixture = pipeline.PipelineTests()

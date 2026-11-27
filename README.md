@@ -9,9 +9,9 @@ An LLM-powered, command-line assistant that develops relational database designs
 3. **DBMS selection:** Choose from PostgreSQL, MySQL/MariaDB, SQLite and SQL Server, including a comparison table and rejection reasons.
 4. **Documentation:** Validate one structured design model, then deterministically render requirements, DBMS decision, Mermaid ER diagrams, logical schema, normalization analysis and assumptions.
 5. **Revision:** Convert natural-language changes to an updated full model, regenerate the affected documents, preserve prior version folders, record a change log and invalidate previous approval.
-6. **SQL:** Require explicit approval, generate DBMS-specific `schema.sql` and `seed.sql`, run table-coverage checks and support **real SQLite in-memory execution, schema-catalog comparisons and foreign-key validation** (optional). A bounded SQL repair loop passes error feedback to the model.
+6. **SQL:** Require explicit approval, generate DBMS-specific `schema.sql` and `seed.sql`, and run table-coverage checks. A separate user command executes saved PostgreSQL, MySQL/MariaDB, or SQL Server files in an already-running container whose image is local. For SQLite, it writes to a user-selected database file; an in-memory verification command is also available.
 
-**Limitations:** Kilo Gateway connectivity and the opening structured workflow have been tested against the live `kilo-auto/free` endpoint, but the complete included test scenario has not been run end to end against a hosted model. Only SQLite SQL execution is automated; PostgreSQL, MySQL/MariaDB and SQL Server must be tested using their own servers before claiming executable correctness. Structural checks cannot prove 3NF, completeness, performance, or that generated SQL faithfully implements every rule. The final scenario run, architecture report and critique report remain separate submission tasks.
+**Limitations:** Kilo Gateway connectivity and the opening structured workflow have been tested against the live `kilo-auto/free` endpoint, but the complete included test scenario has not been run end to end against a hosted model. Server execution requires an existing running container and a locally available image. Structural checks cannot prove 3NF, completeness, performance, or that generated SQL faithfully implements every rule. The final scenario run, architecture report and critique report remain separate submission tasks.
 
 ## Requirements
 
@@ -64,7 +64,7 @@ After an answered round, one model call assesses coverage and returns the next 1
 
 Completed requirements replace intake in later stages. Design and revision calls send only the selected DBMS instead of repeating its comparison report. Revisions retain the full model because arbitrary changes must propagate consistently across the entire design. An omitted DBMS choice in a revision response preserves the local complete choice. SQL generation sends table definitions, business rules, assumptions, ambiguities, and transaction/business requirements, omitting normalization and functional-dependency prose.
 
-Missing seed data for a table without foreign keys and missing SQLite indexes use append-only SQL fragments with the relevant table definition. Uncertain errors, FK-related seed repairs, syntax errors, and type mismatches fall back to complete scripts and the approved model. Assembled scripts always undergo the existing coverage checks and optional SQLite execution. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds this loop. `DBA_AGENT_LLM_ATTEMPTS` bounds network, JSON and stage-validation retries. Network retries reuse the same request; JSON and validation retries add a short correction message without copying the previous response.
+Missing seed data for a table without foreign keys can use append-only SQL fragments with the relevant table definition. Uncertain errors, FK-related seed repairs, syntax errors, and type mismatches fall back to complete scripts and the approved model. Assembled scripts undergo coverage checks during generation; database execution happens only through a later user command. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds the static repair loop. `DBA_AGENT_LLM_ATTEMPTS` bounds network, JSON and stage-validation retries. Network retries reuse the same request; JSON and validation retries add a short correction message without copying the previous response.
 
 The cache lives only in the current `LLMClient` process. Keys hash actual serialized inputs, prompt contents, stage, model, base URL and credential identity. Service calls additionally hash full requirements, DBMS choice, authoritative design and version without transmitting that context. Changed inputs cannot hit the old entry. Cached JSON is revalidated and copied before returning. Invalid stage responses are excluded, and failed SQL validation clears the cache. Set `DBA_AGENT_CACHE_ENABLED=0` to disable it. Temperature zero supports repeatable requests but does not guarantee model determinism.
 
@@ -81,7 +81,7 @@ dba-agent
 
 Use the activation path for your environment (`venv` or `.venv`). The full-screen workspace has a session sidebar, conversation history, generated-file previews, and a multiline composer. Type a system description to start, or select a saved session in the sidebar. Paste the opening description from [scenario.md](scenario.md) for the library scenario. Enter sends a message, Shift+Enter inserts a newline, Ctrl+N starts a session, Ctrl+B toggles the sidebar, and Ctrl+Q exits. Completed interview rounds and workflow checkpoints are saved automatically.
 
-Answer interview questions in the composer. When a design is ready, select a file to preview it, type a revision request, or use `/approve`. Approval opens a confirmation dialog. Use `/sql` after approval to generate SQL, with execution verification enabled for SQLite. `/continue` resumes an interrupted model stage. `/help` lists all commands. The interface stays responsive during model calls and shows errors in the conversation.
+Answer interview questions in the composer. When a design is ready, select a file to preview it, type a revision request, or use `/approve`. Approval opens a confirmation dialog. Use `/sql` after approval to generate both files. Then use `/execute-sql CONTAINER DATABASE USER` for a server DBMS or `/execute-sql DATABASE_FILE` for SQLite. Set `DBA_AGENT_SQL_PASSWORD` before starting the workspace for container execution. `/verify-sqlite` runs a separate in-memory check. `/continue` resumes an interrupted model stage. `/help` lists all commands.
 
 Use `dba-agent interactive` to open the workspace explicitly. The individual commands below also work for scripts and direct session access.
 
@@ -115,11 +115,18 @@ python -m dba_agent.cli approve SESSION_UUID
 # 7. Generate schema.sql and seed.sql
 python -m dba_agent.cli sql SESSION_UUID
 
-# 8. Only when SQLite was selected: execute SQL in a real isolated SQLite database
-python -m dba_agent.cli sql SESSION_UUID --verify-sqlite
+# 8. After both files exist, execute in an already-running PostgreSQL, MySQL/MariaDB, or SQL Server container
+# Set DBA_AGENT_SQL_PASSWORD privately in the environment first.
+python -m dba_agent.cli execute-sql SESSION_UUID --container CONTAINER --database DATABASE --user USER
+
+# Or, for SQLite, write to a database file selected by the user
+python -m dba_agent.cli execute-sql SESSION_UUID --database path/to/database.sqlite
+
+# Optional SQLite in-memory check
+python -m dba_agent.cli verify-sqlite SESSION_UUID
 ```
 
-Note: steps 7 and 8 are alternatives, not successive commands: SQL generation consumes the `APPROVED` state. To request real SQLite verification, use `--verify-sqlite` on the **first** `sql` command.
+Execution is a separate user command after generation. It runs `schema.sql` first and runs `seed.sql` only if schema succeeds. The Docker command checks that the selected container is running, its image is present locally, and the matching client exists inside it. It never starts a container or downloads an image. SQLite uses Python's built-in driver and requires no image. Use an empty target database you intend to modify; SQL files can create tables and insert rows.
 
 `python -m dba_agent.cli continue SESSION_UUID` resumes an interrupted LLM stage. `answer --json answers.json` accepts an object whose keys **exactly** match the displayed question texts.
 
@@ -156,6 +163,7 @@ output/
 - `dba_agent/service.py`: orchestration, checkpoint/retry, revision and SQL pipeline.
 - `dba_agent/render.py`: deterministic file output and Mermaid diagrams.
 - `dba_agent/sql.py`: lexical coverage and SQLite execution checks.
+- `dba_agent/docker_sql.py`: local-image checks and container execution with `psql`, `mysql`/`mariadb`, or `sqlcmd`.
 - `dba_agent/cli.py`: command-line interface.
 - `dba_agent/prompts/`: human-readable prompts for each model task.
 - `tests/`: deterministic offline tests, including executable SQLite SQL.
@@ -175,4 +183,4 @@ The test suite uses an injected scripted model (not a real LLM) and validates ac
 
 ## Assignment tracking
 
-The implementation covers the six required workflow stages at a functional prototype level, including persistence, external prompts, provider configuration and local logs. **Still needed before final submission:** an official end-to-end scenario run, the max-three-page architecture report, a genuine critique of at least three design flaws and remediations (or an account of checks performed), and executable verification against the actual chosen DBMS when not SQLite. Optional +15% bonus for an automatic repair loop with a real DBMS has only been exercised for SQLite; no assertion is made for other systems.
+The implementation covers the six required workflow stages at a functional prototype level, including persistence, external prompts, provider configuration and local logs. **Still needed before final submission:** an official end-to-end scenario run, the max-three-page architecture report, a genuine critique of at least three design flaws and remediations (or an account of checks performed), and live executable verification against the actual chosen DBMS. The automatic repair loop uses static checks; later database execution does not feed errors back to the model.

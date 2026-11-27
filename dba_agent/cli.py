@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .config import Config
@@ -21,7 +22,10 @@ def show(session) -> None:
     elif session.state == Stage.APPROVED:
         print("\nApproved. Run the sql command to generate SQL.")
     elif session.state == Stage.SQL_GENERATED:
-        print("\nSQL generated for the approved version.")
+        selected = session.dbms_choice.get("selected")
+        next_step = ("Use execute-sql with a database file, or verify-sqlite for an in-memory check." if selected == "SQLite" else
+                     "Use execute-sql to run the saved files.")
+        print(f"\nSQL generated for the approved version. {next_step}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,7 +50,13 @@ def main(argv: list[str] | None = None) -> int:
     approve.add_argument("session_id")
     sql = sub.add_parser("sql", help="generate SQL only for explicitly approved design")
     sql.add_argument("session_id")
-    sql.add_argument("--verify-sqlite", action="store_true", help="really execute schema and seed in in-memory SQLite")
+    execute = sub.add_parser("execute-sql", help="run generated SQL in an existing container or SQLite database file")
+    execute.add_argument("session_id")
+    execute.add_argument("--container", default="", help="name or ID of an already-running server container")
+    execute.add_argument("--database", required=True, help="server database name, or SQLite file path")
+    execute.add_argument("--user", default="", help="server database username")
+    verify = sub.add_parser("verify-sqlite", help="execute generated SQLite files in a fresh in-memory database")
+    verify.add_argument("session_id")
     args = parser.parse_args(argv)
     if args.command is None and not sys.stdin.isatty():
         parser.error("choose a command or use 'interactive' to open the workspace")
@@ -78,7 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "approve":
             show(agent.approve(args.session_id))
         elif args.command == "sql":
-            print(json.dumps(agent.generate_sql(args.session_id, verify_sqlite=args.verify_sqlite), indent=2))
+            print(json.dumps(agent.generate_sql(args.session_id), indent=2))
+        elif args.command == "execute-sql":
+            print(json.dumps(agent.execute_sql(args.session_id, container=args.container,
+                database=args.database, username=args.user, password=os.getenv("DBA_AGENT_SQL_PASSWORD", "")), indent=2))
+        elif args.command == "verify-sqlite":
+            print(json.dumps(agent.verify_sqlite(args.session_id), indent=2))
         return 0
     except (StateError, ValueError, OSError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

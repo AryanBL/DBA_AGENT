@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,21 +87,40 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(transport.calls, len(outputs))
         return agent, session
 
-    def test_all_stages_through_real_sqlite(self):
+    def test_generation_then_separate_real_sqlite_verification(self):
         agent, session = self.through_design()
         folder = self.cfg.output_dir / session.session_id / "v1"
         for name in ("requirements.md", "dbms-choice.md", "conceptual-model.md", "logical-schema.md", "normalization.md", "assumptions.md"):
             self.assertTrue((folder / name).exists(), name)
         self.assertIn("erDiagram", (folder / "conceptual-model.md").read_text())
         with self.assertRaises(StateError):
-            agent.generate_sql(session.session_id, verify_sqlite=True)
+            agent.generate_sql(session.session_id)
         agent.approve(session.session_id)
         agent.llm.transport = ScriptedTransport([self.sql])
-        result = agent.generate_sql(session.session_id, verify_sqlite=True)
-        self.assertTrue(result["verified_sqlite"])
-        self.assertEqual(result["counts"], {"customers": 2, "orders": 3})
+        with self.assertRaises(StateError):
+            agent.verify_sqlite(session.session_id)
+        result = agent.generate_sql(session.session_id)
+        self.assertNotIn("verified_sqlite", result)
+        verified = agent.verify_sqlite(session.session_id)
+        self.assertTrue(verified["verified_sqlite"])
+        self.assertEqual(verified["counts"], {"customers": 2, "orders": 3})
         self.assertEqual(agent.get(session.session_id).state, Stage.SQL_GENERATED)
         self.assertEqual(len((self.cfg.output_dir / "llm-calls.jsonl").read_text().splitlines()), 7)
+
+    def test_generated_sqlite_files_run_into_selected_database_file(self):
+        agent, session = self.through_design()
+        agent.approve(session.session_id)
+        agent.llm.transport = ScriptedTransport([self.sql])
+        database = Path(self.temp.name) / "sample.sqlite"
+        with self.assertRaises(StateError):
+            agent.execute_sql(session.session_id, database=str(database))
+        self.assertFalse(database.exists())
+        agent.generate_sql(session.session_id)
+        result = agent.execute_sql(session.session_id, database=str(database))
+        self.assertTrue(result["executed"])
+        self.assertEqual(result["counts"], {"customers": 2, "orders": 3})
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 3)
 
     def test_revision_creates_new_version_and_invalidates_approval(self):
         agent, session = self.through_design()
@@ -118,7 +138,7 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(StateError):
             agent.generate_sql(session.session_id)
 
-    def test_interactive_cli_resumes_and_generates_verified_sql(self):
+    def test_interactive_cli_resumes_and_generates_sql_files(self):
         intro = {
             "actors": ["Customer"], "entities": ["customer", "order"],
             "processes": ["place order"], "requirements": ["keep order records"], "ambiguities": [],
@@ -206,7 +226,7 @@ class PipelineTests(unittest.TestCase):
         agent.approve(session.session_id)
         bad = {"schema_sql": self.sql["schema_sql"], "seed_sql": "INSERT INTO customers (customer_id,name) VALUES (1,'Jules');"}
         agent.llm.transport = ScriptedTransport([bad, self.sql])
-        result = agent.generate_sql(session.session_id, verify_sqlite=True)
+        result = agent.generate_sql(session.session_id)
         self.assertEqual(result["attempts"], 2)
         self.assertTrue((self.cfg.output_dir / "sql-validation.jsonl").exists())
 

@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import Config
 from .context import interview_summary, sql_design, repair_context
+from .docker_sql import execute_docker_sql
 from .interview import REQUIRED_CATEGORIES, validate_requirements
 from .llm import LLMClient, append_jsonl
 from .model import validate_dbms_choice, validate_design
@@ -162,13 +163,11 @@ class AgentService:
         session.approve()
         return self._save(session)
 
-    def generate_sql(self, session_id: str, verify_sqlite: bool = False) -> dict[str, Any]:
+    def generate_sql(self, session_id: str) -> dict[str, Any]:
         session = self.get(session_id)
         session.require_sql_approval()
         tables = [t["name"] for t in session.design.model["tables"]]
         dbms = session.dbms_choice["selected"]
-        if verify_sqlite and dbms != "SQLite":
-            raise StateError("--verify-sqlite only supports sessions whose selected DBMS is SQLite")
         payload = {"dbms": dbms, "design": sql_design(session.design.model),
                    "requirements": {key: session.requirements[key] for key in ("business_rules", "transactions")}}
         last_error = ""
@@ -183,7 +182,6 @@ class AgentService:
                 schema, seed = response.get("schema_sql"), response.get("seed_sql")
             try:
                 validate_sql_artifacts(schema, seed, tables)
-                counts = execute_sqlite(schema, seed, tables, session.design.model) if verify_sqlite else None
                 path = self.config.output_dir / session.session_id / f"v{session.active_version}"
                 # Only publish both files after checks pass, avoiding partially updated versions.
                 write_file(path / "schema.sql", schema)
@@ -191,10 +189,51 @@ class AgentService:
                 session.design.artifacts.update({"schema.sql": str(path / "schema.sql"), "seed.sql": str(path / "seed.sql")})
                 session.mark_sql_generated()
                 self._save(session)
-                return {"schema": str(path / "schema.sql"), "seed": str(path / "seed.sql"), "verified_sqlite": verify_sqlite, "counts": counts, "attempts": attempt}
+                return {"schema": str(path / "schema.sql"), "seed": str(path / "seed.sql"), "attempts": attempt}
             except StateError as exc:
                 last_error = self.llm.redact(str(exc))
                 self.llm.cache.clear()  # Never reuse SQL that failed executable validation.
                 append_jsonl(self.config.output_dir / "sql-validation.jsonl", self.llm.redact({"session_id": session_id, "version": session.active_version, "attempt": attempt, "dbms": dbms, "error": last_error, "error_kind": "validation"}))
                 payload = repair_context(schema, seed, session.design.model, last_error, dbms)
         raise StateError(f"SQL failed validation after {self.config.max_sql_attempts} attempt(s): {last_error}")
+
+    def _generated_files(self, session: Session) -> tuple[Path, Path]:
+        if session.state != Stage.SQL_GENERATED:
+            raise StateError("Generate both schema.sql and seed.sql with the sql command before execution.")
+        folder = self.config.output_dir / session.session_id / f"v{session.active_version}"
+        paths = (folder / "schema.sql", folder / "seed.sql")
+        for path in paths:
+            if session.design.artifacts.get(path.name) != str(path) or not path.is_file() or not path.read_bytes().strip():
+                raise StateError(f"The active version is missing {path.name}; generate both SQL files before execution.")
+        return paths
+
+    def execute_sql(self, session_id: str, *, container: str = "", database: str,
+                    username: str = "", password: str = "") -> dict[str, Any]:
+        """Execute existing generated files only after the user calls this method."""
+        session = self.get(session_id)
+        schema, seed = self._generated_files(session)
+        dbms = session.dbms_choice["selected"]
+        if dbms == "SQLite":
+            if not database.strip():
+                raise StateError("A SQLite database file path is required; SQL was not executed.")
+            database_path = Path(database).expanduser()
+            if database_path.resolve() in (schema.resolve(), seed.resolve()):
+                raise StateError("The SQLite database path cannot be a generated SQL file; SQL was not executed.")
+            counts = execute_sqlite(schema.read_text(encoding="utf-8"), seed.read_text(encoding="utf-8"),
+                                    [table["name"] for table in session.design.model["tables"]],
+                                    session.design.model, database=database_path)
+            return {"executed": True, "dbms": dbms, "database": str(database_path),
+                    "schema": str(schema), "seed": str(seed), "counts": counts}
+        return execute_docker_sql(schema, seed, dbms=dbms,
+                                  container=container, database=database, username=username, password=password)
+
+    def verify_sqlite(self, session_id: str) -> dict[str, Any]:
+        """Run a separate in-memory verification after both files are generated."""
+        session = self.get(session_id)
+        if session.dbms_choice["selected"] != "SQLite":
+            raise StateError("SQLite verification requires a SQLite design.")
+        schema_path, seed_path = self._generated_files(session)
+        tables = [table["name"] for table in session.design.model["tables"]]
+        counts = execute_sqlite(schema_path.read_text(encoding="utf-8"),
+                                seed_path.read_text(encoding="utf-8"), tables, session.design.model)
+        return {"schema": str(schema_path), "seed": str(seed_path), "counts": counts, "verified_sqlite": True}

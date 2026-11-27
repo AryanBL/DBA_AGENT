@@ -199,9 +199,11 @@ This deliberately uses **regeneration rather than independent textual patching**
 
 ### Stage 6 — Approval, schema SQL and seed SQL
 
-`approve(id)` calls `Session.approve()`: only a ready design can be approved, and the approval belongs to that exact version. `sql(id)` calls `require_sql_approval()` first, then asks the model for `schema_sql` and `seed_sql` in the chosen SQL dialect. The static checks assert that every table has a `CREATE TABLE` and an `INSERT INTO`. With `--verify-sqlite` **and only if SQLite is the selected DBMS**, the code also executes both scripts in a fresh in-memory SQLite database with foreign keys enabled, reads back columns, declared types, primary keys, foreign keys, required indexes and uniqueness from the SQLite catalog, counts rows in every table, and checks `PRAGMA foreign_key_check`. Invalid scripts are sent back to a repair prompt with the validation error, up to `DBA_AGENT_MAX_SQL_ATTEMPTS`.
+`approve(id)` calls `Session.approve()`: only a ready design can be approved, and the approval belongs to that exact version. `sql(id)` calls `require_sql_approval()` first, then asks the model for `schema_sql` and `seed_sql` in the chosen SQL dialect. The static checks assert that every table has a `CREATE TABLE` and an `INSERT INTO`. Static failures are sent back to a repair prompt, up to `DBA_AGENT_MAX_SQL_ATTEMPTS`. Generation writes both files and never executes them.
 
-The two SQL files are published and the session transitions to `SQL_GENERATED` only after these checks succeed. The model is specifically instructed to populate **every table**, use realistic values, respect foreign-key insertion order, and exercise optional relationships, join tables and edge cases where relevant. These quality requirements remain essential during manual review, especially for the non-SQLite dialects.
+After generation, the user can call `execute-sql` for PostgreSQL, MySQL/MariaDB, SQL Server, or SQLite. Server DBMSs require an already-running container, its image present locally, and a `psql`, `mysql`/`mariadb`, or `sqlcmd` client. SQLite writes to a user-selected database file using Python's built-in driver and needs no image. The command executes the saved schema first, then the seed, stopping on errors. It never pulls or installs an image or starts a container. `verify-sqlite` separately runs the files in memory with foreign keys enabled, compares the catalog against the design and checks row counts and foreign keys.
+
+The two SQL files are published and the session transitions to `SQL_GENERATED` only after static checks succeed. The model is specifically instructed to populate **every table**, use realistic values, respect foreign-key insertion order, and exercise optional relationships, join tables and edge cases where relevant. These quality requirements remain essential during manual review.
 
 ## 8. Other classes and functions
 
@@ -215,7 +217,7 @@ The constructor accepts a `Config` and optional injected `transport`. `_http()` 
 
 ### `AgentService` (`service.py`)
 
-`__init__` wires config, LLM and JSON store; `get` loads sessions; `_save` persists them; `create` runs intake and starts the interview; `advance` resumes incomplete work, generates/assesses questions, then selects a DBMS and creates the design; `answer` submits answers and continues; `revise` performs a validated full replacement; `approve` records user approval; and `generate_sql` invokes SQL generation, table-coverage checks, optional SQLite execution, bounded repair and final persistence.
+`__init__` wires config, LLM and JSON store; `get` loads sessions; `_save` persists them; `create` runs intake and starts the interview; `advance` resumes incomplete work, generates/assesses questions, then selects a DBMS and creates the design; `answer` submits answers and continues; `revise` performs a validated full replacement; `approve` records user approval; `generate_sql` invokes SQL generation, table-coverage checks, bounded static repair and final persistence; and `execute_sql` runs the saved files only when separately requested.
 
 ### `model.py`, `render.py`, `sql.py`, `cli.py`
 
@@ -281,7 +283,7 @@ python -m dba_agent.cli approve SESSION_UUID
 python -m dba_agent.cli sql SESSION_UUID
 ```
 
-The last command creates SQL for whichever DBMS the model chose. If and only if the choice is SQLite, **replace** that final command with `python -m dba_agent.cli sql SESSION_UUID --verify-sqlite` to really execute and check it. You **cannot run both SQL commands in succession** because generation changes the session state from `APPROVED` to `SQL_GENERATED`. Use `continue SESSION_UUID` to resume a session interrupted before the design is ready.
+The last command creates SQL for whichever DBMS the model chose. After both files exist, run `python -m dba_agent.cli execute-sql SESSION_UUID --container CONTAINER --database DATABASE --user USER` for PostgreSQL, MySQL/MariaDB or SQL Server, with `DBA_AGENT_SQL_PASSWORD` set privately. The named container must already be running and its image must be local. For SQLite, run `python -m dba_agent.cli execute-sql SESSION_UUID --database path/to/database.sqlite`; no image is required. `verify-sqlite SESSION_UUID` remains available for an in-memory check. Use `continue SESSION_UUID` to resume a session interrupted before the design is ready.
 
 ## 12. Observability, testing, and reliability
 
@@ -300,7 +302,7 @@ The test client injects a **scripted transport** rather than sending requests to
 | Stage 3: four DBMS alternatives with rationale | Implemented | `select_dbms`, `validate_dbms_choice`, `dbms-choice.md`. |
 | Stage 4: four mutually consistent design documents | Implemented as deterministic renderers from one schema model | Mermaid diagrams, PK/FK checks; *semantic* correctness needs manual validation. |
 | Stage 5: propagate revisions, changelog, explicit approval | Implemented | New full-model version, all six Markdown regenerated, approval invalidated. |
-| Stage 6: schema.sql and mandatory seed.sql | Implemented with static checks and optional SQLite execution | Real execution for SQLite only; all other dialects require integration tests. |
+| Stage 6: schema.sql and mandatory seed.sql | Implemented with static checks | Generation does not execute SQL. Separate execution supports all four DBMS choices. |
 | Persistence | Implemented | Atomic JSON session files, resume command. |
 | Separated prompts | Implemented | Eight editable `dba_agent/prompts/*.txt` files. |
 | LLM-call attempt logging | Implemented | `output/llm-calls.jsonl`, including errors. |
@@ -309,13 +311,13 @@ The test client injects a **scripted transport** rather than sending requests to
 | Complete scenario output | Not yet demonstrated | A comprehensive `scenario.md` is included, but its full live output still needs to be generated and reviewed. |
 | Short architecture report (max ~3 pages) | Not supplied as separate submission file | This comprehensive guide is **not** a substitute for the required concise report. |
 | Genuine critique of three flaws | Not supplied as separate submission file | Must identify actual flaws in a run, fix them, and document evidence. |
-| Bonus real-DBMS validation/repair loop | Partially implemented for SQLite | SQLite execution and repair are real; not demonstrated for PostgreSQL/MySQL/SQL Server. |
+| Bonus real-DBMS validation/repair loop | Static repair only | Separate execution does not feed database errors back into the model. |
 
 ## 14. Design limitations and recommended next steps
 
 **First:** run an actual end-to-end test against the LLM gateway using the included `scenario.md`. Inspect every stage and document; models can return invalid JSON or unsupported SQL even when deterministic validators are present.
 
-**Second:** test generated `schema.sql` followed by `seed.sql` on a fresh instance of the *selected* DBMS, with keys/constraints enabled. For SQLite the implemented `--verify-sqlite` mode already does this. For PostgreSQL, MariaDB/MySQL or SQL Server, add a database-specific runner or test the outputs manually in an isolated instance; do not claim successful SQL execution from lexical checks alone.
+**Second:** test generated `schema.sql` followed by `seed.sql` on a fresh instance of the *selected* DBMS, with keys/constraints enabled. Use `execute-sql` with an existing local-image container for PostgreSQL, MySQL/MariaDB or SQL Server, or a selected database file for SQLite. Do not claim successful SQL execution from lexical checks alone.
 
 **Third:** strengthen the design validator by checking that relationship/cardinality declarations match actual FKs and bridge tables, and that all requirements have traceability links into tables/constraints. Investigate potential name collisions, dialect-specific type restrictions and SQL injection in generated scripts before using outputs outside a sandbox.
 

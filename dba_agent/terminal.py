@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -25,7 +26,13 @@ HELP = """**Commands**
 
 `/review` Browse generated files · `/revise your request` Request a revision
 
-`/approve` Approve the current version · `/sql` Generate SQL and verify SQLite
+`/approve` Approve the current version · `/sql` Generate SQL files
+
+`/execute-sql CONTAINER DATABASE USER` Run saved server SQL (`DBA_AGENT_SQL_PASSWORD` required)
+
+`/execute-sql DATABASE_FILE` Run saved SQLite SQL into a file
+
+`/verify-sqlite` Execute saved SQLite files in memory
 
 `/delete` Delete selected session · `/help` Show commands
 
@@ -238,7 +245,9 @@ class Workspace(App):
         elif session.state == Stage.APPROVED:
             hint = "APPROVED · Use /sql to generate SQL"
         elif session.state == Stage.SQL_GENERATED:
-            hint = "SQL GENERATED · Review files or describe a revision"
+            selected = session.dbms_choice.get("selected")
+            hint = ("SQL GENERATED · Use /execute-sql or /verify-sqlite" if selected == "SQLite" else
+                    "SQL GENERATED · Use /execute-sql or review files")
         self.query_one("#input-hint", Static).update(hint)
         self.refresh_sessions()
 
@@ -369,8 +378,24 @@ class Workspace(App):
             if self.session.state != Stage.APPROVED:
                 await self.message("error", "Approve the current design before generating SQL.")
                 return
-            verify = self.session.dbms_choice.get("selected") == "SQLite"
-            self.operation("Generating and validating SQL…", lambda: self.agent.generate_sql(self.session.session_id, verify_sqlite=verify))
+            self.operation("Generating SQL files…", lambda: self.agent.generate_sql(self.session.session_id))
+        elif command == "/execute-sql":
+            if self.session.dbms_choice.get("selected") == "SQLite":
+                if not argument.strip():
+                    await self.message("error", "Use `/execute-sql DATABASE_FILE` after `/sql`.")
+                    return
+                container, database, username = "", argument.strip(), ""
+            else:
+                parts = argument.split()
+                if len(parts) != 3:
+                    await self.message("error", "Use `/execute-sql CONTAINER DATABASE USER` after `/sql`. Set DBA_AGENT_SQL_PASSWORD in the environment.")
+                    return
+                container, database, username = parts
+            self.operation("Executing generated SQL…", lambda: self.agent.execute_sql(
+                self.session.session_id, container=container, database=database,
+                username=username, password=os.getenv("DBA_AGENT_SQL_PASSWORD", "")))
+        elif command == "/verify-sqlite":
+            self.operation("Verifying generated SQLite files…", lambda: self.agent.verify_sqlite(self.session.session_id))
         elif command == "/delete":
             sid = self.session.session_id
             self.push_screen(Confirm(f"Delete session {sid}? Generated files are retained."),
@@ -398,7 +423,15 @@ class Workspace(App):
                 await self.show_session(result)
             else:
                 await self.show_session(self.agent.get(self.session.session_id))
-                status = "SQLite execution verified." if result.get("verified_sqlite") else "SQL files generated."
+                if result.get("verified_sqlite"):
+                    status = "SQLite execution verified."
+                elif result.get("executed"):
+                    status = "SQL files executed."
+                else:
+                    selected = self.session.dbms_choice.get("selected")
+                    next_step = ("Use `/execute-sql DATABASE_FILE` to run them, or `/verify-sqlite` to check them in memory." if selected == "SQLite" else
+                                 "Use `/execute-sql CONTAINER DATABASE USER` to run them.")
+                    status = f"SQL files generated. {next_step}"
                 await self.message("assistant", status + f"\n\nSchema: {result['schema']}\n\nSeed: {result['seed']}")
         except Exception as exc:
             # Reload the checkpoint saved before subsequent model calls fail.
@@ -409,7 +442,7 @@ class Workspace(App):
                 except (ValueError, OSError):
                     pass
             self.refresh_sessions()
-            await self.message("error", f"{exc}\n\nUse `/continue` to retry a saved stage, or select a saved session.")
+            await self.message("error", str(exc))
         finally:
             self.busy = False
             self.query_one("#busy").display = False
