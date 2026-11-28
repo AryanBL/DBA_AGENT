@@ -8,13 +8,9 @@ from contextlib import contextmanager
 from time import monotonic, sleep
 from uuid import uuid4
 
-from .docker_sql import _docker, database_client, database_command
+from .docker_sql import _docker, database_client, database_command, local_database_image
 from .session import StateError
 from .sql_validation import SQLArtifacts, SQLConflict
-
-
-_DEFAULT_IMAGES = {"PostgreSQL": "postgres:latest", "MySQL/MariaDB": "mariadb:lts",
-                   "SQL Server": "mcr.microsoft.com/mssql/server:2022-latest"}
 
 
 def _execution_script(artifacts: SQLArtifacts, file: str, marker: str) -> tuple[str, list[tuple[int, int]]]:
@@ -87,7 +83,7 @@ class DockerSeedValidator:
         if self.dbms == "SQL Server":
             # The password belongs only to this temporary container. Pass it explicitly
             # because -X1 suppresses environment variables for sqlcmd.
-            command += ["-P", self.password, "-l", "5", "-X1", "-x", "-r0", "-h-1"]
+            command += ["-P", self.password, "-l", "5", "-X1", "-r0", "-h-1"]
         elif self.dbms == "MySQL/MariaDB":
             command += ["--skip-reconnect", "--binary-mode", "--local-infile=0", "--show-warnings", "--verbose",
                         "--init-command=SET SESSION sql_mode='STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,"
@@ -140,11 +136,9 @@ class DockerSeedValidator:
 
 @contextmanager
 def docker_seed_validator(dbms: str, image: str):
-    image = image or _DEFAULT_IMAGES[dbms]
-    if image.startswith("-"):
-        raise StateError(f"Set DBA_AGENT_SQL_VALIDATION_IMAGE to a local {dbms} server image before generating SQL.")
     if dbms == "SQL Server" and os.getenv("ACCEPT_EULA") != "Y":
         raise StateError("SQL Server validation requires ACCEPT_EULA=Y to run the selected image.")
+    image = local_database_image(dbms, image)
     name = f"dba-agent-validation-{uuid4().hex}"
     password = f"Dba!9{uuid4().hex}"
     settings = {

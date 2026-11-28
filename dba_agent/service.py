@@ -1,13 +1,16 @@
 """Six-stage orchestration with saved checkpoints, versioning and artifact propagation."""
 from __future__ import annotations
 
+import os
+import re
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .config import Config
 from .context import interview_summary, sql_design
-from .docker_sql import execute_docker_sql
+from .docker_sql import execute_docker_sql, provision_docker_sql
 from .docker_validation import docker_seed_validator
 from .interview import REQUIRED_CATEGORIES, validate_requirements
 from .llm import LLMClient, append_jsonl
@@ -230,12 +233,18 @@ class AgentService:
                 raise StateError(f"The active version is missing {path.name}; generate both SQL files before execution.")
         return paths
 
-    def execute_sql(self, session_id: str, *, container: str = "", database: str,
+    def execute_sql(self, session_id: str, *, container: str = "", database: str = "",
                     username: str = "", password: str = "") -> dict[str, Any]:
         """Execute existing generated files only after the user calls this method."""
         session = self.get(session_id)
         schema, seed = self._generated_files(session)
         dbms = session.dbms_choice["selected"]
+        if not database.strip() and not container.strip():
+            table = session.design.model["tables"][0]["name"].lower()
+            slug = re.sub(r"[^a-z0-9_]+", "_", table).strip("_")[:25] or "database"
+            database = f"dba_{slug}_v{session.active_version}_{uuid4().hex[:8]}"
+            if dbms == "SQLite":
+                database = str(schema.parent / f"{database}.sqlite")
         if dbms == "SQLite":
             if not database.strip():
                 raise StateError("A SQLite database file path is required; SQL was not executed.")
@@ -247,8 +256,31 @@ class AgentService:
                                     session.design.model, database=database_path)
             return {"executed": True, "dbms": dbms, "database": str(database_path),
                     "schema": str(schema), "seed": str(seed), "counts": counts}
-        return execute_docker_sql(schema, seed, dbms=dbms,
-                                  container=container, database=database, username=username, password=password)
+        if not container.strip():
+            result = provision_docker_sql(schema, seed, dbms=dbms, database=database,
+                                          username=os.getenv("DBA_AGENT_SQL_USER", "").strip(),
+                                          password=os.getenv("DBA_AGENT_SQL_PASSWORD", ""),
+                                          image_override=self.config.sql_validation_image)
+        else:
+            result = execute_docker_sql(schema, seed, dbms=dbms,
+                                        container=container, database=database,
+                                        username=username or os.getenv("DBA_AGENT_SQL_USER", "").strip(),
+                                        password=password or os.getenv("DBA_AGENT_SQL_PASSWORD", ""))
+        if result.get("executed") and result.get("inspection_commands"):
+            session.metadata["sql_inspection"] = {
+                "version": session.active_version,
+                "commands": result["inspection_commands"],
+            }
+            self._save(session)
+        return result
+
+    def sql_inspection_commands(self, session_id: str) -> dict[str, str]:
+        session = self.get(session_id)
+        saved = session.metadata.get("sql_inspection", {})
+        if (session.state != Stage.SQL_GENERATED or saved.get("version") != session.active_version
+                or not saved.get("commands")):
+            raise StateError("No inspection commands for this SQL version. Run `/execute-sql` successfully first.")
+        return saved["commands"]
 
     def verify_sqlite(self, session_id: str) -> dict[str, Any]:
         """Run a separate in-memory verification after both files are generated."""

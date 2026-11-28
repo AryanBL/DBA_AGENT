@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from pathlib import Path
 from typing import Callable
 
@@ -15,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, LoadingIndicator, OptionList, RichLog, Static, TextArea
+from textual.widgets import Button, Footer, Input, LoadingIndicator, OptionList, RichLog, Static, TextArea
 
 from .service import AgentService
 from .session import Session, Stage
@@ -29,9 +30,13 @@ HELP = """**Commands**
 
 `/approve` Approve the current version · `/sql` Generate SQL files
 
-`/execute-sql CONTAINER DATABASE USER` Run saved server SQL (`DBA_AGENT_SQL_PASSWORD` required)
+`/execute-sql` Create a database and load the generated SQL
+
+`/execute-sql CONTAINER DATABASE USER` Run saved server SQL with `DBA_AGENT_SQL_PASSWORD`
 
 `/execute-sql DATABASE_FILE` Run saved SQLite SQL into a file
+
+`/sql-commands` Show table listing and row preview commands from the last successful container run
 
 `/verify-sqlite` Execute saved SQLite files in memory
 
@@ -73,6 +78,63 @@ class Confirm(ModalScreen[bool]):
 
     def key_escape(self) -> None:
         self.dismiss(False)
+
+
+class SQLConnection(ModalScreen[tuple[str, str, str, str] | None]):
+    fields = (("container", "Docker container"), ("database", "Database name"), ("username", "Database username"))
+
+    def __init__(self, target: tuple[str, str, str], *, needs_password: bool):
+        super().__init__()
+        self.target = target
+        self.needs_password = needs_password
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="sql-connection-box"):
+            yield Static("Execute schema.sql and seed.sql")
+            for (name, label), value in zip(self.fields, self.target):
+                yield Static(label)
+                yield Input(value=value, id=f"sql-{name}")
+            if self.needs_password:
+                yield Static("Database password")
+                yield Input(password=True, id="sql-password")
+            yield Static("", id="sql-connection-error")
+            with Horizontal():
+                yield Button("Cancel", id="sql-cancel")
+                yield Button("Run SQL", id="sql-run", variant="primary")
+
+    def on_mount(self) -> None:
+        field = "password" if self.needs_password and all(self.target) else "container"
+        self.query_one(f"#sql-{field}", Input).focus()
+
+    @on(Button.Pressed, "#sql-run")
+    @on(Input.Submitted)
+    def submit(self) -> None:
+        error = self.query_one("#sql-connection-error", Static)
+        values = []
+        for name, label in self.fields:
+            field = self.query_one(f"#sql-{name}", Input)
+            if not field.value.strip():
+                error.update(f"Enter a value for {label.lower()}.")
+                field.focus()
+                return
+            values.append(field.value.strip())
+        password = ""
+        if self.needs_password:
+            field = self.query_one("#sql-password", Input)
+            password = field.value
+            if not password:
+                error.update("Enter the database password.")
+                field.focus()
+                return
+            field.clear()
+        self.dismiss((values[0], values[1], values[2], password))
+
+    @on(Button.Pressed, "#sql-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    def key_escape(self) -> None:
+        self.cancel()
 
 
 class Preview(ModalScreen):
@@ -136,11 +198,16 @@ class Workspace(App):
     #shortcuts { width: 1fr; color: #939faa; }
     #send { min-width: 10; width: 10; height: 1; min-height: 1; border: none; background: #29433f; color: #a4f2df; }
     Footer { background: #171c22; }
-    Confirm, Preview { align: center middle; background: #000000 65%; }
+    Confirm, Preview, SQLConnection { align: center middle; background: #000000 65%; }
     #confirm-box { width: 65; height: auto; padding: 2; border: round #68d5bf; background: #1b2229; }
     #confirm-box Static { height: auto; margin-bottom: 1; }
     #confirm-box Horizontal { height: 3; align-horizontal: right; }
     #confirm-box Button { margin-left: 1; }
+    #sql-connection-box { width: 65; max-width: 95%; height: auto; max-height: 95%; padding: 1 2; border: round #68d5bf; background: #1b2229; }
+    #sql-connection-box Static { height: auto; }
+    #sql-connection-error { color: #f18d8d; min-height: 1; }
+    #sql-connection-box Horizontal { height: 3; align-horizontal: right; }
+    #sql-connection-box Button { margin-left: 1; }
     #preview-box { width: 90%; height: 90%; padding: 1 2; border: round #68d5bf; background: #171c22; }
     #preview-title { height: 2; color: #68d5bf; }
     #preview-content { height: 1fr; background: #171c22; }
@@ -394,20 +461,12 @@ class Workspace(App):
                 return
             self.operation("Generating SQL files…", lambda: self.agent.generate_sql(self.session.session_id))
         elif command == "/execute-sql":
-            if self.session.dbms_choice.get("selected") == "SQLite":
-                if not argument.strip():
-                    await self.message("error", "Use `/execute-sql DATABASE_FILE` after `/sql`.")
-                    return
-                container, database, username = "", argument.strip(), ""
-            else:
-                parts = argument.split()
-                if len(parts) != 3:
-                    await self.message("error", "Use `/execute-sql CONTAINER DATABASE USER` after `/sql`. Set DBA_AGENT_SQL_PASSWORD in the environment.")
-                    return
-                container, database, username = parts
-            self.operation("Executing generated SQL…", lambda: self.agent.execute_sql(
-                self.session.session_id, container=container, database=database,
-                username=username, password=os.getenv("DBA_AGENT_SQL_PASSWORD", "")))
+            await self.execute_sql_command(self.session, argument)
+        elif command == "/sql-commands":
+            try:
+                await self.show_sql_commands(self.agent.sql_inspection_commands(self.session.session_id))
+            except ValueError as exc:
+                await self.message("error", str(exc))
         elif command == "/verify-sqlite":
             self.operation("Verifying generated SQLite files…", lambda: self.agent.verify_sqlite(self.session.session_id))
         elif command == "/delete":
@@ -416,6 +475,49 @@ class Workspace(App):
                              lambda confirmed: self.operation("Deleting session…", lambda: self.agent.delete(sid), deleting=True) if confirmed else None)
         else:
             await self.message("assistant", "Unknown command or missing revision text. Type `/help` to see commands.")
+
+    async def execute_sql_command(self, session: Session, argument: str) -> None:
+        if session.state != Stage.SQL_GENERATED:
+            await self.message("error", "Generate the SQL files with `/sql` before executing them.")
+            return
+
+        def execute(container: str = "", database: str = "", username: str = "", password: str = "") -> None:
+            self.operation("Executing generated SQL…", lambda: self.agent.execute_sql(
+                session.session_id, container=container, database=database, username=username, password=password))
+
+        if not argument.strip():
+            execute()
+            return
+        if session.dbms_choice.get("selected") == "SQLite":
+            execute(database=argument.strip())
+            return
+
+        try:
+            parts = shlex.split(argument)
+        except ValueError:
+            await self.message("error", "Check the quotes in your connection arguments.")
+            return
+        if len(parts) != 3 or not all(part.strip() for part in parts):
+            await self.message("error", "Use `/execute-sql` to create a database or `/execute-sql CONTAINER DATABASE USER` to load an existing one.")
+            return
+
+        target = (parts[0], parts[1], parts[2])
+        env_password = os.getenv("DBA_AGENT_SQL_PASSWORD", "")
+        if env_password:
+            execute(*target, env_password)
+            return
+
+        def confirm(connection: tuple[str, str, str, str] | None) -> None:
+            if connection is not None:
+                container, database, username, password = connection
+                execute(container, database, username, password)
+
+        self.push_screen(SQLConnection(target, needs_password=True), confirm)
+
+    async def show_sql_commands(self, commands: dict[str, str]) -> None:
+        await self.message("assistant", "Run these in your shell and enter the database password when prompted."
+            f"\n\nList tables\n\n```sh\n{commands['list_tables']}\n```"
+            f"\n\nPreview up to 10 rows\n\n```sh\n{commands['preview_rows']}\n```")
 
     def operation(self, label: str, call: Callable, deleting: bool = False) -> None:
         self.busy = True
@@ -440,13 +542,19 @@ class Workspace(App):
                 if result.get("verified_sqlite"):
                     status = "SQLite execution verified."
                 elif result.get("executed"):
-                    status = "SQL files executed."
+                    status = f"SQL files executed.\n\nDatabase: {result['database']}" if "database" in result else "SQL files executed."
+                    if result.get("container"):
+                        status += f"\n\nContainer: {result['container']}"
+                    if result.get("username"):
+                        status += f"\n\nDatabase username: {result['username']}"
                 else:
                     selected = self.session.dbms_choice.get("selected")
-                    next_step = ("Use `/execute-sql DATABASE_FILE` to run them, or `/verify-sqlite` to check them in memory." if selected == "SQLite" else
-                                 "Use `/execute-sql CONTAINER DATABASE USER` to run them.")
+                    next_step = ("Use `/execute-sql` to create a database file, or `/verify-sqlite` to check them in memory." if selected == "SQLite" else
+                                 "Use `/execute-sql` to start a local database container and load them.")
                     status = f"SQL files generated. {next_step}"
                 await self.message("assistant", status + f"\n\nSchema: {result['schema']}\n\nSeed: {result['seed']}")
+                if commands := result.get("inspection_commands"):
+                    await self.show_sql_commands(commands)
         except Exception as exc:
             # Reload the checkpoint saved before subsequent model calls fail.
             if self.session:

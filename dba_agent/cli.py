@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
 from .config import Config
@@ -52,11 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     approve.add_argument("session_id")
     sql = sub.add_parser("sql", help="generate SQL only for explicitly approved design")
     sql.add_argument("session_id")
-    execute = sub.add_parser("execute-sql", help="run generated SQL in an existing container or SQLite database file")
+    execute = sub.add_parser("execute-sql", help="create a database from the generated SQL or load an explicit target")
     execute.add_argument("session_id")
     execute.add_argument("--container", default="", help="name or ID of an already-running server container")
-    execute.add_argument("--database", required=True, help="server database name, or SQLite file path")
-    execute.add_argument("--user", default="", help="server database username")
+    execute.add_argument("--database", default="", help="server database name, or SQLite file path")
+    execute.add_argument("--user", default="", help="username for an existing server container")
     verify = sub.add_parser("verify-sqlite", help="execute generated SQLite files in a fresh in-memory database")
     verify.add_argument("session_id")
     args = parser.parse_args(argv)
@@ -95,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(agent.generate_sql(args.session_id), indent=2))
         elif args.command == "execute-sql":
             print(json.dumps(agent.execute_sql(args.session_id, container=args.container,
-                database=args.database, username=args.user, password=os.getenv("DBA_AGENT_SQL_PASSWORD", "")), indent=2))
+                database=args.database, username=args.user), indent=2))
         elif args.command == "verify-sqlite":
             print(json.dumps(agent.verify_sqlite(args.session_id), indent=2))
         return 0

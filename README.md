@@ -66,7 +66,7 @@ Completed requirements replace intake in later stages. Design and revision calls
 
 During SQL generation, the selected engine runs the schema and seed in a fresh database with constraints enabled. SQLite also checks stored values against common declared types. On failure the model receives the database error, the affected statements, and any related definitions. The first repair call gives the full patch instructions. Later calls use a shorter prompt. The program applies only patches to the listed statement IDs and tests the complete pair again. `DBA_AGENT_MAX_SQL_ATTEMPTS` bounds generation and repair attempts. `DBA_AGENT_LLM_ATTEMPTS` bounds retries for network, JSON, and response validation errors.
 
-Server validation uses a disposable Docker container with no external network and no connection to the deployment database. The default local images are `postgres:latest`, `mariadb:lts`, and `mcr.microsoft.com/mssql/server:2022-latest`. Set `DBA_AGENT_SQL_VALIDATION_IMAGE` to use another already-local image, such as MySQL or the version used in deployment. SQL Server validation requires `ACCEPT_EULA=Y` in the app's environment. SQLite validation runs in memory.
+Server validation uses a disposable Docker container with temporary credentials. Validation and automatic execution both run `docker image ls` to find a compatible local image. They accept versioned tags and prefer MySQL to MariaDB when both are installed. Set `DBA_AGENT_SQL_VALIDATION_IMAGE` to select a specific already-local image for both steps. SQL Server requires `ACCEPT_EULA=Y` in the app's environment. SQLite validation runs in memory.
 
 The cache lives only in the current `LLMClient` process. Keys hash actual serialized inputs, prompt contents, stage, model, base URL and credential identity. Service calls additionally hash full requirements, DBMS choice, authoritative design and version without transmitting that context. Changed inputs cannot hit the old entry. Cached JSON is revalidated and copied before returning. Invalid stage responses are excluded, and failed SQL validation clears the cache. Set `DBA_AGENT_CACHE_ENABLED=0` to disable it. Temperature zero supports repeatable requests but does not guarantee model determinism.
 
@@ -83,7 +83,7 @@ dba-agent
 
 Use the activation path for your environment (`venv` or `.venv`). The full-screen workspace has a session sidebar, conversation history, generated-file previews, and a multiline composer. Type a system description to start, or select a saved session in the sidebar. Paste the opening description from [scenario.md](scenario.md) for the library scenario. Enter sends a message, Shift+Enter inserts a newline, Ctrl+N starts a session, Ctrl+B toggles the sidebar, and Ctrl+Q exits. Completed interview rounds and workflow checkpoints are saved automatically.
 
-Answer interview questions in the composer. When a design is ready, select a file to preview it, type a revision request, or use `/approve`. Approval opens a confirmation dialog. Use `/sql` after approval to generate both files. Then use `/execute-sql CONTAINER DATABASE USER` for a server DBMS or `/execute-sql DATABASE_FILE` for SQLite. Set `DBA_AGENT_SQL_PASSWORD` before starting the workspace for container execution. `/verify-sqlite` runs a separate in-memory check. `/continue` resumes an interrupted model stage. `/help` lists all commands.
+Answer interview questions in the composer. When a design is ready, select a file to preview it, type a revision request, or use `/approve`. After approval, use `/sql` to generate both files. Set `DBA_AGENT_SQL_USER` and `DBA_AGENT_SQL_PASSWORD` in `.env` for server databases, then restart the app. Run `/execute-sql` to start a fresh container, create a database and login, and apply both files. The app displays the database and container names. Use `/sql-commands` after a successful container run to show the commands for listing tables and previewing rows again. For SQLite, `/execute-sql` creates a database file beside the SQL files. Use `/execute-sql CONTAINER DATABASE USER` or `/execute-sql DATABASE_FILE` to select an existing server target or a specific SQLite path. `/verify-sqlite` runs an in-memory check. `/continue` resumes an interrupted model stage. `/help` lists all commands.
 
 Use `dba-agent interactive` to open the workspace explicitly. The individual commands below also work for scripts and direct session access.
 
@@ -117,8 +117,10 @@ python -m dba_agent.cli approve SESSION_UUID
 # 7. Generate schema.sql and seed.sql
 python -m dba_agent.cli sql SESSION_UUID
 
-# 8. After both files exist, execute in an already-running PostgreSQL, MySQL/MariaDB, or SQL Server container
-# Set DBA_AGENT_SQL_PASSWORD privately in the environment first.
+# 8. Create a database from the generated files using the shared credentials in .env
+python -m dba_agent.cli execute-sql SESSION_UUID
+
+# Or load an existing server database using its login
 python -m dba_agent.cli execute-sql SESSION_UUID --container CONTAINER --database DATABASE --user USER
 
 # Or, for SQLite, write to a database file selected by the user
@@ -128,7 +130,7 @@ python -m dba_agent.cli execute-sql SESSION_UUID --database path/to/database.sql
 python -m dba_agent.cli verify-sqlite SESSION_UUID
 ```
 
-Execution is a separate user command after generation. It runs `schema.sql` first and runs `seed.sql` only if schema succeeds. The Docker command checks that the selected container is running, its image is present locally, and the matching client exists inside it. It never starts a container or downloads an image. SQLite uses Python's built-in driver and requires no image. Use an empty target database you intend to modify; SQL files can create tables and insert rows.
+Execution runs `schema.sql` first and `seed.sql` after the schema succeeds. Automatic server execution uses an already-local image and creates a container with no published ports. A successful run leaves the container running for access through `docker exec`. SQLite uses Python's built-in driver. If you supply an existing target, use an empty database you intend to modify.
 
 `python -m dba_agent.cli continue SESSION_UUID` resumes an interrupted LLM stage. `answer --json answers.json` accepts an object whose keys **exactly** match the displayed question texts.
 

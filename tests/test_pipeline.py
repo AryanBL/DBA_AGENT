@@ -7,9 +7,12 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from textual.widgets import Input
 
 from dba_agent import AgentService, Config, Stage, StateError
-from dba_agent.terminal import Workspace, Composer, Confirm, Preview
+from dba_agent.terminal import Workspace, Composer, Confirm, Preview, SQLConnection
 from dba_agent.llm import LLMClient
 
 
@@ -121,6 +124,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["counts"], {"customers": 2, "orders": 3})
         with sqlite3.connect(database) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 3)
+        automatic = agent.execute_sql(session.session_id)
+        automatic_path = Path(automatic["database"])
+        self.assertEqual(automatic_path.parent, Path(automatic["schema"]).parent)
+        self.assertRegex(automatic_path.name, r"^dba_customers_v1_[a-f0-9]{8}\.sqlite$")
+        self.assertEqual(automatic["counts"], result["counts"])
 
     def test_revision_creates_new_version_and_invalidates_approval(self):
         agent, session = self.through_design()
@@ -185,6 +193,80 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(session.state, Stage.SQL_GENERATED)
         self.assertEqual(len(session.interview_rounds), 2)
         self.assertTrue(Path(session.design.artifacts["schema.sql"]).is_file())
+
+    def test_workspace_execute_sql_provisions_or_loads_existing_server(self):
+        agent, session = self.through_design()
+        agent.approve(session.session_id)
+        agent.llm.transport = ScriptedTransport([self.sql])
+        files = agent.generate_sql(session.session_id)
+        session = agent.get(session.session_id)
+        session.dbms_choice["selected"] = "PostgreSQL"
+        agent.store.save(session)
+
+        async def exercise():
+            app = Workspace(agent)
+            async with app.run_test(size=(100, 27)) as pilot:
+                await app.show_session(session)
+
+                async def send(command):
+                    app.query_one(Composer).focus()
+                    app.query_one(Composer).load_text(command)
+                    await pilot.press("enter")
+
+                with patch.dict("os.environ", DBA_AGENT_SQL_PASSWORD="shared-password"):
+                    await send("/execute-sql")
+                    await asyncio.wait_for(app.workers.wait_for_complete(), timeout=10)
+                self.assertEqual(agent.sql_inspection_commands(session.session_id), commands)
+                with patch.object(app, "show_sql_commands") as show_commands:
+                    await send("/sql-commands")
+                    show_commands.assert_awaited_once_with(commands)
+                provision.assert_called_once()
+                self.assertEqual(provision.call_args.args, (Path(files["schema"]), Path(files["seed"])))
+                self.assertRegex(provision.call_args.kwargs["database"], r"^dba_customers_v1_[a-f0-9]{8}$")
+                self.assertEqual(provision.call_args.kwargs["username"], "shared_user")
+                self.assertEqual(provision.call_args.kwargs["password"], "shared-password")
+
+                await send('/execute-sql local-db "test database" tester')
+                self.assertIsInstance(app.screen, SQLConnection)
+                await pilot.press("escape")
+                execute.assert_not_called()
+
+                await send('/execute-sql local-db "test database" tester')
+                self.assertTrue(await pilot.click("#sql-run"))
+                self.assertIsInstance(app.screen, SQLConnection)
+                execute.assert_not_called()
+                password = app.screen.query_one("#sql-password", Input)
+                self.assertTrue(password.password)
+                password.value = "test password"
+                password.focus()
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, SQLConnection)
+                await asyncio.wait_for(app.workers.wait_for_complete(), timeout=10)
+                execute.assert_called_once_with(Path(files["schema"]), Path(files["seed"]), dbms="PostgreSQL",
+                                                container="local-db", database="test database",
+                                                username="tester", password="test password")
+
+                with patch.dict("os.environ", DBA_AGENT_SQL_PASSWORD="from-env"):
+                    await send('/execute-sql local-db "test database" tester')
+                    await asyncio.wait_for(app.workers.wait_for_complete(), timeout=10)
+                self.assertEqual(execute.call_count, 2)
+                self.assertEqual(execute.call_args.kwargs["password"], "from-env")
+
+        commands = {"list_tables": "docker exec list", "preview_rows": "docker exec rows"}
+        with patch.dict("os.environ", DBA_AGENT_SQL_USER="shared_user", DBA_AGENT_SQL_PASSWORD=""), patch(
+            "dba_agent.service.execute_docker_sql", return_value={"executed": True, **files, "inspection_commands": commands}
+        ) as execute, patch("dba_agent.service.provision_docker_sql", return_value={"executed": True, **files, "inspection_commands": commands}) as provision:
+            asyncio.run(exercise())
+
+    def test_sql_inspection_commands_require_successful_current_version(self):
+        agent, session = self.through_design()
+        with self.assertRaisesRegex(StateError, "Run `/execute-sql` successfully first"):
+            agent.sql_inspection_commands(session.session_id)
+        session.metadata["sql_inspection"] = {"version": session.active_version, "commands": {"list_tables": "old"}}
+        agent.store.save(session)
+        with self.assertRaisesRegex(StateError, "Run `/execute-sql` successfully first"):
+            agent.sql_inspection_commands(session.session_id)
 
     def test_workspace_resumes_previews_and_confirms_deletion(self):
         agent, session = self.through_design()

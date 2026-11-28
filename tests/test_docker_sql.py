@@ -1,11 +1,12 @@
 """Offline checks for the separate, no-pull container execution command."""
 import subprocess
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from dba_agent.docker_sql import execute_docker_sql
+from dba_agent.docker_sql import _inspection_commands, execute_docker_sql, local_database_image, provision_docker_sql
 from dba_agent.docker_validation import _execution_script, _native_error, docker_seed_validator
 from dba_agent.session import StateError
 from dba_agent.sql_validation import SQLArtifacts
@@ -57,6 +58,20 @@ class DockerSqlTests(unittest.TestCase):
         self.assertTrue(all("ON_ERROR_STOP=1" in entry[0] and "-e" in entry[0] for entry in seen))
         self.assertTrue(all(entry[2] == "secret" and "secret" not in entry[0] for entry in seen))
         self.assertEqual(output["database"], "example")
+        self.assertIn("pg_catalog.pg_tables", output["inspection_commands"]["list_tables"])
+        self.assertEqual(shlex.split(output["inspection_commands"]["preview_rows"])[-1], "SELECT * FROM items LIMIT 10;")
+
+    def test_inspection_commands_use_detected_client_and_qualified_table(self):
+        for dbms, client, table, query in (
+            ("PostgreSQL", "psql", '"sales"."Order Items"', 'SELECT * FROM "sales"."Order Items" LIMIT 10;'),
+            ("MySQL/MariaDB", "mariadb", "`Order Items`", "SELECT * FROM `Order Items` LIMIT 10;"),
+            ("SQL Server", "/opt/mssql-tools/bin/sqlcmd", "[sales].[Order Items]", "SELECT TOP (10) * FROM [sales].[Order Items];"),
+        ):
+            with self.subTest(dbms=dbms):
+                self.schema.write_text(f"CREATE TABLE {table} (id INT);", encoding="utf-8")
+                commands = _inspection_commands(self.schema, dbms, "local-db", client, "test database", "test user")
+                self.assertEqual(shlex.split(commands["preview_rows"])[:6], ["docker", "exec", "-it", "--", "local-db", client])
+                self.assertEqual(shlex.split(commands["preview_rows"])[-1], query)
 
     def test_sqlcmd_failure_stops_before_seed(self):
         with patch("dba_agent.docker_sql._docker", side_effect=[
@@ -107,6 +122,7 @@ class DockerValidationTests(unittest.TestCase):
 
     def test_disposable_server_uses_local_image_and_cleans_up_on_failure(self):
         with patch("dba_agent.docker_validation._docker", return_value=result()) as docker, \
+                patch("dba_agent.docker_validation.local_database_image", return_value="postgres:local"), \
                 patch("dba_agent.docker_validation.database_client", return_value="psql"), \
                 patch("dba_agent.docker_validation.DockerSeedValidator._run", return_value=result()):
             with self.assertRaisesRegex(StateError, "some failure"):
@@ -117,6 +133,54 @@ class DockerValidationTests(unittest.TestCase):
             self.assertIn("--network=none", launch)
             self.assertEqual(launch[-1], "postgres:local")
             self.assertEqual(cleanup, ("rm", "-f", "-v", launch[launch.index("--name") + 1]))
+
+
+class DockerProvisionTests(unittest.TestCase):
+    def test_local_image_discovery_accepts_version_tags_and_prefers_mysql(self):
+        listing = "mysql-client\tlatest\nmariadb\t11.4\ncontainer-registry.oracle.com/mysql/community-server\t8.4\n"
+        with patch("dba_agent.docker_sql._docker", return_value=result(output=listing)) as docker:
+            self.assertEqual(local_database_image("MySQL/MariaDB"), "container-registry.oracle.com/mysql/community-server:8.4")
+            self.assertEqual(docker.call_args.args[:2], ("image", "ls"))
+            with self.assertRaisesRegex(StateError, "No compatible local image"):
+                local_database_image("PostgreSQL")
+
+    def test_provision_sets_shared_login_and_removes_its_container_if_seed_fails(self):
+        with patch("dba_agent.docker_sql._require_sql_files"), \
+                patch("dba_agent.docker_sql._inspection_commands"), \
+                patch("dba_agent.docker_sql.local_database_image", return_value="mysql:8.4"), \
+                patch("dba_agent.docker_sql.database_client", return_value="mysql"), \
+                patch("dba_agent.docker_sql._wait_for_database"), \
+                patch("dba_agent.docker_sql._run_sql_files", side_effect=StateError("seed.sql failed")), \
+                patch("dba_agent.docker_sql._docker", return_value=result()) as docker:
+            with self.assertRaisesRegex(StateError, "seed.sql failed"):
+                provision_docker_sql(Path("schema.sql"), Path("seed.sql"), dbms="MySQL/MariaDB", database="test_db",
+                                     username="shared_user", password="shared-password")
+        create, start, cleanup = docker.call_args_list
+        self.assertIn("--pull=never", create.args)
+        self.assertNotIn("shared-password", create.args)
+        self.assertEqual(create.kwargs["env"]["MYSQL_PASSWORD"], "shared-password")
+        self.assertEqual(create.kwargs["env"]["MYSQL_USER"], "shared_user")
+        self.assertEqual(create.kwargs["env"]["MYSQL_DATABASE"], "test_db")
+        self.assertEqual(cleanup.args, ("rm", "-f", "-v", start.args[-1]))
+
+    def test_sql_server_creates_shared_login_before_loading_sql(self):
+        with patch.dict("os.environ", ACCEPT_EULA="Y"), \
+                patch("dba_agent.docker_sql._require_sql_files"), \
+                patch("dba_agent.docker_sql._inspection_commands"), \
+                patch("dba_agent.docker_sql.local_database_image", return_value="mcr.microsoft.com/mssql/server:2022-latest"), \
+                patch("dba_agent.docker_sql.database_client", return_value="sqlcmd"), \
+                patch("dba_agent.docker_sql._wait_for_database"), \
+                patch("dba_agent.docker_sql._query", return_value=result()) as setup, \
+                patch("dba_agent.docker_sql._run_sql_files") as load, \
+                patch("dba_agent.docker_sql._docker", return_value=result()):
+            output = provision_docker_sql(Path("schema.sql"), Path("seed.sql"), dbms="SQL Server", database="test_db",
+                                          username="shared_user", password="Example'9!password")
+        self.assertIn("CREATE DATABASE [test_db]", setup.call_args.args[2])
+        self.assertIn("CREATE LOGIN [shared_user] WITH PASSWORD = N'Example''9!password'", setup.call_args.args[2])
+        self.assertIn("ALTER ROLE db_owner ADD MEMBER [shared_user]", setup.call_args.args[2])
+        self.assertIn("shared_user", load.call_args.args[2])
+        self.assertEqual(load.call_args.args[3]["SQLCMDPASSWORD"], "Example'9!password")
+        self.assertEqual(output["username"], "shared_user")
 
 
 if __name__ == "__main__":
