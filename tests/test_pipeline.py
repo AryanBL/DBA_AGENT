@@ -12,7 +12,7 @@ from unittest.mock import patch
 from textual.widgets import Input
 
 from dba_agent import AgentService, Config, Stage, StateError
-from dba_agent.terminal import Workspace, Composer, Confirm, Preview, SQLConnection
+from dba_agent.terminal import Workspace, Composer, Confirm, Preview, SQLConnection, MessageCard, HELP
 from dba_agent.llm import LLMClient
 
 
@@ -89,6 +89,34 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(session.state, Stage.DESIGN_READY)
         self.assertEqual(transport.calls, len(outputs))
         return agent, session
+
+    def test_workspace_copies_messages_and_individual_sql_commands(self):
+        agent, _ = self.service([])
+        commands = {"list_tables": "docker exec tables", "preview_rows": "docker exec rows"}
+        self.assertIn("Copy on a message", HELP)
+
+        async def exercise():
+            app = Workspace(agent)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await app.message("user", "A user prompt")
+                await app.message("assistant", "An agent response")
+                await app.show_sql_commands(commands)
+                cards = list(app.query(MessageCard))
+                cards[0].query_one(".copy-message").press()
+                await pilot.pause()
+                self.assertEqual(app.clipboard, "A user prompt")
+                cards[1].query_one(".copy-message").press()
+                await pilot.pause()
+                self.assertEqual(app.clipboard, "An agent response")
+                command_buttons = list(cards[2].query(".copy-command"))
+                command_buttons[0].press()
+                await pilot.pause()
+                self.assertEqual(app.clipboard, commands["list_tables"])
+                command_buttons[1].press()
+                await pilot.pause()
+                self.assertEqual(app.clipboard, commands["preview_rows"])
+
+        asyncio.run(exercise())
 
     def test_generation_then_separate_real_sqlite_verification(self):
         agent, session = self.through_design()

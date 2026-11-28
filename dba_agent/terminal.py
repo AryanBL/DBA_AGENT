@@ -43,6 +43,7 @@ HELP = """**Commands**
 `/delete` Delete selected session · `/help` Show commands
 
 Enter sends. Shift+Enter inserts a newline. Ctrl+B toggles the sidebar.
+Use Copy on a message to copy its text; generated commands have separate copy buttons.
 """
 
 
@@ -55,6 +56,33 @@ class Composer(TextArea):
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+
+class MessageCard(Vertical):
+    """Conversation text with clipboard actions for the message and any commands."""
+
+    def __init__(self, role: str, content: str, commands: dict[str, str] | None = None):
+        super().__init__(classes=f"message {role}")
+        self.role = role
+        self.content = content
+        self.commands = commands or {}
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="message-heading"):
+            yield Static(self.role.upper(), classes="message-role")
+            yield Button("Copy", name="message", classes="copy-message")
+        yield Static(Markdown(self.content), classes="message-content")
+        if self.commands:
+            with Horizontal(classes="command-actions"):
+                yield Button("Copy table command", name="list_tables", classes="copy-command")
+                yield Button("Copy row command", name="preview_rows", classes="copy-command")
+
+    @on(Button.Pressed)
+    def copy(self, event: Button.Pressed) -> None:
+        event.stop()
+        label = event.button.name or "message"
+        self.app.copy_to_clipboard(self.content if label == "message" else self.commands[label])
+        self.app.notify("Copied to clipboard")
 
 
 class Confirm(ModalScreen[bool]):
@@ -183,6 +211,12 @@ class Workspace(App):
     #stage { height: 3; padding: 1 3; color: #939faa; }
     #conversation { height: 1fr; padding: 0 3; }
     .message { height: auto; margin-bottom: 1; padding: 1 2; }
+    .message-heading { height: 1; }
+    .message-role { width: 1fr; text-style: bold; }
+    .message Button { width: auto; min-width: 6; height: 1; min-height: 1; border: none; padding: 0 1; background: #29433f; color: #a4f2df; }
+    .message-content { height: auto; }
+    .command-actions { height: 1; margin-top: 1; }
+    .command-actions Button { margin-right: 1; }
     .assistant { border-left: thick #68d5bf; background: #161d22; }
     .user { border-left: thick #8c9fe5; background: #1c202d; }
     .error { border-left: thick #f18d8d; background: #2a1d24; }
@@ -285,11 +319,11 @@ class Workspace(App):
         if self.saved:
             listing.highlighted = 0
 
-    async def message(self, role: str, content: str) -> None:
+    async def message(self, role: str, content: str, commands: dict[str, str] | None = None) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
         if self.query("#welcome"):
             await self.query_one("#welcome").remove()
-        await conversation.mount(Static(Markdown(f"**{role.upper()}**\n\n{content}"), classes=f"message {role}"))
+        await conversation.mount(MessageCard(role, content, commands))
         conversation.scroll_end(animate=False)
 
     async def show_session(self, session: Session, history: bool = False) -> None:
@@ -517,7 +551,7 @@ class Workspace(App):
     async def show_sql_commands(self, commands: dict[str, str]) -> None:
         await self.message("assistant", "Run these in your shell and enter the database password when prompted."
             f"\n\nList tables\n\n```sh\n{commands['list_tables']}\n```"
-            f"\n\nPreview up to 10 rows\n\n```sh\n{commands['preview_rows']}\n```")
+            f"\n\nPreview up to 10 rows\n\n```sh\n{commands['preview_rows']}\n```", commands)
 
     def operation(self, label: str, call: Callable, deleting: bool = False) -> None:
         self.busy = True
